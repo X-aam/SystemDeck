@@ -1,0 +1,40 @@
+[package]
+name = "systemdeck-client"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "systemdeck"
+path = "src/main.rs"
+
+[dependencies]
+systemdeck-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+anyhow.workspace = true
+rand.workspace = true
+redb.workspace = true
+hex.workspace = true
+eframe = "0.31"
+reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
+keyring = { version = "3", features = ["windows-native"] }
+dirs = "6"
+open = "5"
+csv = "1"
+# Embedded sessions
+ironrdp-client = { version = "0.1", features = ["native-tls"] }
+ironrdp-input = "*"
+ironrdp-pdu = "0.9"
+vnc-rs = "0.6"
+russh = "0.55"
+vt100 = "0.18"
+russh-sftp = "2"
+# Screen recording (RDP/VNC frames as JPEG)
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+base64 = "0.22"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
+wry = "0.52"
+raw-window-handle = "0.6"

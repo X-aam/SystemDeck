@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SystemDeck Admin</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+</head>
+<body>
+  <!-- Sign in -->
+  <div id="login" class="login hidden">
+    <form id="login-form" class="login-card" autocomplete="on">
+      <div class="brand big"><span class="logo">S</span> SystemDeck</div>
+      <p class="muted">Sign in to manage the server or download the app</p>
+      <label>Username <input id="login-user" name="username" autocomplete="username" required></label>
+      <label>Password <input id="login-pass" name="password" type="password" autocomplete="current-password" required></label>
+      <p id="login-error" class="error hidden"></p>
+      <button type="submit" class="primary wide">Sign in</button>
+    </form>
+  </div>
+
+  <!-- Dashboard -->
+  <div id="app" class="layout hidden">
+    <aside class="side">
+      <div class="brand"><span class="logo">S</span> SystemDeck</div>
+      <nav id="nav">
+        <button data-view="overview" class="nav-item admin-only">Overview</button>
+        <button data-view="users" class="nav-item admin-only">Users</button>
+        <button data-view="teams" class="nav-item admin-only">Teams</button>
+        <button data-view="vaults" class="nav-item admin-only">Vaults &amp; access</button>
+        <button data-view="recordings" class="nav-item admin-only">Session recordings</button>
+        <button data-view="download" class="nav-item">Download app</button>
+      </nav>
+      <div class="side-foot">
+        <div id="me" class="me"></div>
+        <button id="theme-toggle" class="link">Dark mode</button>
+        <button id="logout" class="link danger">Sign out</button>
+      </div>
+    </aside>
+    <main>
+      <header class="top">
+        <div>
+          <h1 id="title">Overview</h1>
+          <p id="subtitle" class="muted"></p>
+        </div>
+        <div id="actions" class="actions"></div>
+      </header>
+      <section id="view" class="view"></section>
+    </main>
+  </div>
+
+  <div id="modal-backdrop" class="backdrop hidden">
+    <div class="modal" role="dialog" aria-modal="true">
+      <h2 id="modal-title"></h2>
+      <div id="modal-body"></div>
+      <p id="modal-error" class="error hidden"></p>
+      <div class="modal-actions">
+        <button id="modal-cancel">Cancel</button>
+        <button id="modal-ok" class="primary">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="toast" class="toast hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>

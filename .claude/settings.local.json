@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "PowerShell",
+      "Bash('/c/Program Files/PuTTY/plink.exe' -ssh -batch -hostkey SHA256:1fmJ67DTCgSRvcNtWuxOY9TZHMpHNOPg7GvTWPzyQJ4 sysadmin@192.168.202.38 -pw welcome@123 'hostname; uptime; *)"
+    ]
+  }
+}

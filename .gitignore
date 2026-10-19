@@ -1,0 +1,27 @@
+# Rust build output
+vaultdesk/target/
+target/
+
+# Packaged release (binaries + live server data)
+vaultdesk/release/
+
+# Live server data and secrets — never commit
+**/data/
+*.key
+*.redb
+
+# Session recordings and launch artifacts
+*.sdrec
+*.sdweb
+*.cast
+*.rdp
+
+# Reverse-engineering inputs: large, third-party, or sensitive
+Setup.RemoteDesktopManager*.exe
+AnyDesk*.exe
+*.msi
+Local data source.csv
+
+# OS cruft
+Thumbs.db
+.DS_Store
