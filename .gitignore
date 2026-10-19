@@ -25,3 +25,6 @@ Local data source.csv
 # OS cruft
 Thumbs.db
 .DS_Store
+
+# Claude Code project config / skills
+.claude/
