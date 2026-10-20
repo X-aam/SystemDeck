@@ -145,28 +145,50 @@ pub struct VaultRequest {
     pub record_ssh: Option<bool>,
 }
 
-/// Server configuration shown in the dashboard Settings page. The AI key is
-/// never returned (only whether one is set).
+/// One AI model as shown in Settings (the key is never returned).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AiProviderInfo {
+    pub id: String,
+    pub label: String,
+    pub url: String,
+    pub model: String,
+    pub key_set: bool,
+}
+
+/// Server configuration shown in the dashboard Settings page.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct ServerConfig {
-    pub ai_url: String,
-    pub ai_model: String,
-    pub ai_key_set: bool,
+    pub ai_providers: Vec<AiProviderInfo>,
+    pub ai_default: String,
     pub ai_enabled: bool,
     pub recording_retention_days: i64,
     pub audit_retention_days: i64,
 }
 
-/// Config changes from the dashboard. `None` leaves a field unchanged; an empty
-/// `ai_key` string clears the stored key.
+/// One model in a config update. An absent/empty `key` keeps the existing key
+/// for that `id`; `id` absent means a new model.
+#[derive(Serialize, Deserialize, Default)]
+pub struct AiProviderInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub url: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// Config changes from the dashboard. `None` leaves that part unchanged.
 #[derive(Serialize, Deserialize, Default)]
 pub struct ServerConfigUpdate {
+    /// Full replacement of the model list when present.
     #[serde(default)]
-    pub ai_url: Option<String>,
+    pub ai_providers: Option<Vec<AiProviderInput>>,
     #[serde(default)]
-    pub ai_model: Option<String>,
-    #[serde(default)]
-    pub ai_key: Option<String>,
+    pub ai_default: Option<String>,
     #[serde(default)]
     pub recording_retention_days: Option<i64>,
     #[serde(default)]

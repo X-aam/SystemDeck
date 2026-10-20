@@ -758,7 +758,7 @@ async function viewScreenRecording(r, cast) {
       h("span", { class: "t" }, `${t.toFixed(1)}s`), h("span", { class: `act ${kind}` }, kind), text || h("span", { class: "muted" }, "(Enter)")))
     : [h("p", { class: "muted" }, "No typing or clicks recorded.")]);
 
-  const replayPane = h("div", {}, aiBar(r), h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel), stage);
+  const replayPane = h("div", {}, h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel), stage);
   const keysPane = h("div", { class: "hidden" }, h("p", { class: "muted" }, "Typed text (Enter-separated), key combinations and clicks. Click a line to see the screen at that moment. Typed passwords appear here too."), keysBox);
   const tabReplay = h("button", { class: "on" }, "Replay screen");
   const tabKeys = h("button", {}, `Activity (${activity.length})`);
@@ -845,7 +845,7 @@ async function viewRecording(r) {
   speedSel.addEventListener("change", () => { speed = Number(speedSel.value); });
   const endBtn = h("button", { onclick: () => { stop(); seek(total); } }, "Show all");
 
-  const replayPane = h("div", {}, aiBar(r), h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel, endBtn), pre);
+  const replayPane = h("div", {}, h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel, endBtn), pre);
   const keysPane = h("div", { class: "hidden" }, h("p", { class: "muted" }, "Lines typed by the user (Enter-separated). Typed passwords appear here too."), keysBox);
   const tabReplay = h("button", { class: "on" }, "Replay screen");
   const tabKeys = h("button", {}, `Typed commands (${typed.length})`);
@@ -918,50 +918,74 @@ async function renderAudit() {
 // ---------- settings ----------
 
 async function renderSettings() {
-  setHeader("Settings", "Server configuration — AI and retention");
+  setHeader("Settings", "Server configuration — AI models and retention");
   let cfg;
   try { cfg = await api("GET", "/api/admin/config"); } catch (e) { toast(e.message, true); return; }
 
-  const aiUrl = h("input", { value: cfg.ai_url || "", placeholder: "http://localhost:11434/v1" });
-  const aiModel = h("input", { value: cfg.ai_model || "", placeholder: "llama3.1" });
-  const aiKey = h("input", { type: "password", placeholder: cfg.ai_key_set ? "•••••• set — leave blank to keep" : "(none)" });
+  // Working copy; keys stay blank (blank = keep the stored key).
+  let providers = (cfg.ai_providers || []).map((p) => ({ id: p.id, label: p.label, url: p.url, model: p.model, key_set: p.key_set, key: "" }));
+  let def = cfg.ai_default || (providers[0] && providers[0].id) || "";
+
+  const list = h("div", {});
+  const drawModels = () => {
+    if (!providers.length) { list.replaceChildren(h("p", { class: "muted" }, "No models yet. Add one to enable AI.")); return; }
+    list.replaceChildren(...providers.map((p, i) => {
+      const label = h("input", { value: p.label || "", placeholder: "name, e.g. Local Llama" });
+      const url = h("input", { value: p.url || "", placeholder: "http://localhost:11434/v1" });
+      const model = h("input", { value: p.model || "", placeholder: "llama3.1" });
+      const key = h("input", { type: "password", placeholder: p.key_set ? "•••• set — blank keeps it" : "(none)" });
+      label.addEventListener("input", () => (p.label = label.value));
+      url.addEventListener("input", () => (p.url = url.value));
+      model.addEventListener("input", () => (p.model = model.value));
+      key.addEventListener("input", () => (p.key = key.value));
+      const defRadio = h("input", { type: "radio", name: "defmodel" });
+      defRadio.checked = def === p.id || (!def && i === 0);
+      defRadio.addEventListener("change", () => { def = p.id || ""; });
+      const out = h("span", { class: "muted" });
+      const test = h("button", { class: "small" }, "Test");
+      test.addEventListener("click", async () => {
+        out.className = "muted"; out.textContent = "Testing…";
+        try {
+          const r = await api("POST", "/api/admin/config/test-ai", { url: p.url, model: p.model, key: p.key, id: p.id });
+          out.className = r.ok ? "ok-text" : "error";
+          out.textContent = r.ok ? "OK — " + (r.reply || "reachable") : "Failed: " + r.error;
+        } catch (e) { out.className = "error"; out.textContent = "Failed: " + e.message; }
+      });
+      const rm = h("button", { class: "small danger" }, "Remove");
+      rm.addEventListener("click", () => { providers.splice(i, 1); drawModels(); });
+      return h("div", { class: "model-row" },
+        h("div", { class: "model-grid" },
+          h("label", {}, "Name", label), h("label", {}, "Model", model),
+          h("label", {}, "Endpoint URL (ends in /v1)", url), h("label", {}, "API key (optional)", key)),
+        h("div", { class: "model-actions" }, h("label", { class: "check" }, defRadio, "Default"), test, out, h("span", { class: "grow" }), rm));
+    }));
+  };
+  drawModels();
+
+  const add = h("button", { class: "small" }, "+ Add model");
+  add.addEventListener("click", () => { providers.push({ id: "", label: "", url: "", model: "", key_set: false, key: "" }); drawModels(); });
+
   const recDays = h("input", { type: "number", min: "0", value: String(cfg.recording_retention_days || 0) });
   recDays.style.width = "100px";
   const audDays = h("input", { type: "number", min: "0", value: String(cfg.audit_retention_days || 0) });
   audDays.style.width = "100px";
-  const testOut = h("span", { class: "muted" });
-
-  const testBtn = h("button", { class: "small" }, "Test connection");
-  testBtn.addEventListener("click", async () => {
-    testOut.className = "muted";
-    testOut.textContent = "Testing…";
-    try {
-      const r = await api("POST", "/api/admin/config/test-ai", { ai_url: aiUrl.value, ai_model: aiModel.value, ai_key: aiKey.value });
-      if (r.ok) { testOut.className = "ok-text"; testOut.textContent = "OK — " + (r.reply || "reachable"); }
-      else { testOut.className = "error"; testOut.textContent = "Failed: " + r.error; }
-    } catch (e) { testOut.className = "error"; testOut.textContent = "Failed: " + e.message; }
-  });
 
   const save = h("button", { class: "primary" }, "Save settings");
   save.addEventListener("click", async () => {
     const body = {
-      ai_url: aiUrl.value,
-      ai_model: aiModel.value,
+      ai_providers: providers.map((p) => { const o = { id: p.id || undefined, label: p.label, url: p.url, model: p.model }; if (p.key) o.key = p.key; return o; }),
+      ai_default: def,
       recording_retention_days: Number(recDays.value) || 0,
       audit_retention_days: Number(audDays.value) || 0,
     };
-    if (aiKey.value) body.ai_key = aiKey.value; // only change the key if a new one was typed
-    try { await api("PUT", "/api/admin/config", body); toast("Settings saved"); aiKey.value = ""; await renderSettings(); }
+    try { await api("PUT", "/api/admin/config", body); toast("Settings saved"); await renderSettings(); }
     catch (e) { toast(e.message, true); }
   });
 
-  $("view").replaceChildren(h("div", { class: "card", style: "max-width:660px" },
-    h("h3", {}, "AI — session summaries"),
-    h("p", { class: "muted" }, "Point at your own OpenAI-compatible model (Ollama / llama.cpp / vLLM). Nothing leaves your network. Leave the URL blank to disable AI."),
-    h("label", {}, "Endpoint URL (ends in /v1)", aiUrl),
-    h("label", {}, "Model", aiModel),
-    h("label", {}, "API key (optional)", aiKey),
-    h("div", { class: "grant-add" }, h("label", {}, " ", testBtn), h("label", {}, " ", testOut)),
+  $("view").replaceChildren(h("div", { class: "card", style: "max-width:780px" },
+    h("h3", {}, "AI models"),
+    h("p", { class: "muted" }, "Add one or more OpenAI-compatible models (Ollama / llama.cpp / vLLM). The Default model is used for session summaries. Nothing leaves your network; remove all models to disable AI."),
+    list, h("div", { style: "margin-top:10px" }, add),
     h("h3", { style: "margin-top:20px" }, "Retention"),
     h("div", { class: "grant-add" },
       h("label", {}, "Recordings older than (days)", recDays),

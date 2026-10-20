@@ -175,3 +175,11 @@ code { font-family: ui-monospace, Consolas, monospace; background: var(--hover);
 .ai-summary button { margin-top: 8px; }
 
 .ok-text { color: var(--accent-dark); }
+
+/* AI model rows in Settings */
+.model-row { border: 1px solid var(--border); border-radius: 8px; padding: 12px; margin-bottom: 10px; background: var(--panel); }
+.model-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px 14px; }
+.model-grid label { margin: 0; }
+.model-actions { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.model-actions .grow { flex: 1; }
+@media (max-width: 680px) { .model-grid { grid-template-columns: 1fr; } }

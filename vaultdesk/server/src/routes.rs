@@ -303,11 +303,15 @@ struct AuditQuery {
 
 async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<ServerConfig>> {
     let c = st.db.config()?;
+    let providers = c.providers();
+    let default = c.default_provider().map(|p| p.id).unwrap_or_default();
     Ok(Json(ServerConfig {
-        ai_enabled: !c.ai_url.trim().is_empty(),
-        ai_key_set: !c.ai_key.is_empty(),
-        ai_url: c.ai_url,
-        ai_model: c.ai_model,
+        ai_enabled: !providers.is_empty(),
+        ai_default: default,
+        ai_providers: providers
+            .into_iter()
+            .map(|p| AiProviderInfo { id: p.id, label: p.label, url: p.url, model: p.model, key_set: !p.key.is_empty() })
+            .collect(),
         recording_retention_days: c.recording_retention_days,
         audit_retention_days: c.audit_retention_days,
     }))
@@ -315,14 +319,38 @@ async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResul
 
 async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<ServerConfigUpdate>) -> ApiResult<Json<ServerConfig>> {
     let mut c = st.db.config()?;
-    if let Some(v) = req.ai_url {
-        c.ai_url = v.trim().trim_end_matches('/').to_string();
+    if let Some(list) = req.ai_providers {
+        // Keys are write-only: a blank key keeps the existing one for that id.
+        let existing = c.providers();
+        let mut out = Vec::new();
+        for p in list {
+            let id = p.id.filter(|s| !s.is_empty()).unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+            let key = match p.key {
+                Some(k) if !k.is_empty() => k,
+                _ => existing.iter().find(|e| e.id == id).map(|e| e.key.clone()).unwrap_or_default(),
+            };
+            let label = if p.label.trim().is_empty() { p.model.clone() } else { p.label.trim().to_string() };
+            out.push(crate::store::AiProvider {
+                id,
+                label,
+                url: p.url.trim().trim_end_matches('/').to_string(),
+                model: p.model.trim().to_string(),
+                key,
+            });
+        }
+        // Drop entries with no URL, and migrate off the legacy single fields.
+        c.ai_providers = out.into_iter().filter(|p| !p.url.is_empty()).collect();
+        c.ai_url = String::new();
+        c.ai_model = String::new();
+        c.ai_key = String::new();
+        if !c.ai_providers.iter().any(|p| p.id == c.ai_default) {
+            c.ai_default = c.ai_providers.first().map(|p| p.id.clone()).unwrap_or_default();
+        }
     }
-    if let Some(v) = req.ai_model {
-        c.ai_model = v.trim().to_string();
-    }
-    if let Some(v) = req.ai_key {
-        c.ai_key = v; // empty string clears it
+    if let Some(d) = req.ai_default {
+        if c.ai_providers.iter().any(|p| p.id == d) {
+            c.ai_default = d;
+        }
     }
     if let Some(v) = req.recording_retention_days {
         c.recording_retention_days = v.max(0);
@@ -331,32 +359,34 @@ async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUse
         c.audit_retention_days = v.max(0);
     }
     st.db.put_config(&c)?;
-    st.db.audit(&admin.username, "config_update", "server settings", if c.ai_url.is_empty() { "AI off" } else { "AI on" });
+    st.db.audit(&admin.username, "config_update", "server settings", &format!("{} model(s)", c.providers().len()));
     admin_get_config(State(st), AdminUser(admin)).await
 }
 
 #[derive(serde::Deserialize)]
 struct TestAi {
     #[serde(default)]
-    ai_url: Option<String>,
+    url: Option<String>,
     #[serde(default)]
-    ai_model: Option<String>,
+    model: Option<String>,
     #[serde(default)]
-    ai_key: Option<String>,
+    key: Option<String>,
+    /// Test an already-saved model by id (used when the key is hidden).
+    #[serde(default)]
+    id: Option<String>,
 }
 
-/// Tests an AI endpoint: the one in the body if given, else the saved config.
+/// Tests an AI model: the one in the body, or a saved one by id, or the default.
 async fn admin_test_ai(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
     let saved = st.db.config()?;
-    let url = req.ai_url.filter(|s| !s.trim().is_empty()).unwrap_or(saved.ai_url);
-    let model = req.ai_model.filter(|s| !s.trim().is_empty()).unwrap_or(saved.ai_model);
-    // An empty key in the body means "use the saved key"; a non-empty one overrides.
-    let key = match req.ai_key {
+    let base = req.id.as_deref().and_then(|id| saved.provider(id)).or_else(|| saved.default_provider()).unwrap_or_default();
+    let url = req.url.filter(|s| !s.trim().is_empty()).unwrap_or(base.url);
+    let model = req.model.filter(|s| !s.trim().is_empty()).unwrap_or(base.model);
+    let key = match req.key {
         Some(k) if !k.is_empty() => k,
-        _ => saved.ai_key,
+        _ => base.key,
     };
-    let ai = crate::ai::Ai::new(Some(url), Some(model), Some(key))
-        .ok_or_else(|| ApiError::bad_request("no AI endpoint URL to test"))?;
+    let ai = crate::ai::Ai::new(Some(url), Some(model), Some(key)).ok_or_else(|| ApiError::bad_request("no endpoint URL to test"))?;
     match ai.ping().await {
         Ok(reply) => Ok(Json(json!({ "ok": true, "reply": reply.chars().take(120).collect::<String>() }))),
         Err(e) => Ok(Json(json!({ "ok": false, "error": format!("{e:#}") }))),
@@ -581,9 +611,16 @@ async fn admin_delete_recording(State(st): State<AppState>, AdminUser(admin): Ad
     Ok(ok())
 }
 
+#[derive(serde::Deserialize, Default)]
+struct SummarizeQuery {
+    /// Optional model id; defaults to the configured default model.
+    #[serde(default)]
+    model: Option<String>,
+}
+
 /// AI: summarise a recording and flag sensitive actions, caching the result.
-async fn admin_summarize_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<RecordingMeta>> {
-    let ai = st.ai().ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured (set an endpoint in Settings)"))?;
+async fn admin_summarize_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>, Query(q): Query<SummarizeQuery>) -> ApiResult<Json<RecordingMeta>> {
+    let ai = st.ai(q.model.as_deref()).ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured (add a model in Settings)"))?;
     let mut meta = st.db.recording(id)?.ok_or_else(|| ApiError::not_found("recording not found"))?;
     let data = st.db.read_recording(id)?;
     let transcript = transcript_for_ai(meta.kind, &data);

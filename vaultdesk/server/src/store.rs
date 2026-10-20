@@ -65,16 +65,63 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
 }
 
+/// One configured AI model/endpoint.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct AiProvider {
+    pub id: String,
+    /// Friendly name shown in the UI.
+    pub label: String,
+    /// OpenAI-compatible base URL ending in /v1.
+    pub url: String,
+    pub model: String,
+    pub key: String,
+}
+
 /// Server settings edited from the dashboard (sealed at rest). Source of truth;
 /// seeded once from CLI/env on first start.
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct Config {
-    pub ai_url: String,
-    pub ai_model: String,
-    pub ai_key: String,
+    /// Configured models; the first or `ai_default` is used by default.
+    pub ai_providers: Vec<AiProvider>,
+    pub ai_default: String,
     pub recording_retention_days: i64,
     pub audit_retention_days: i64,
+    // Legacy single-endpoint fields (pre-multi-model); migrated on read.
+    #[serde(default)]
+    pub ai_url: String,
+    #[serde(default)]
+    pub ai_model: String,
+    #[serde(default)]
+    pub ai_key: String,
+}
+
+impl Config {
+    /// All models, with the legacy single endpoint surfaced as one provider.
+    pub fn providers(&self) -> Vec<AiProvider> {
+        let mut v = self.ai_providers.clone();
+        if v.is_empty() && !self.ai_url.trim().is_empty() {
+            v.push(AiProvider {
+                id: "default".into(),
+                label: "Default".into(),
+                url: self.ai_url.clone(),
+                model: self.ai_model.clone(),
+                key: self.ai_key.clone(),
+            });
+        }
+        v
+    }
+
+    /// The default model (chosen one, else the first configured).
+    pub fn default_provider(&self) -> Option<AiProvider> {
+        let ps = self.providers();
+        ps.iter().find(|p| p.id == self.ai_default).cloned().or_else(|| ps.into_iter().next())
+    }
+
+    pub fn provider(&self, id: &str) -> Option<AiProvider> {
+        self.providers().into_iter().find(|p| p.id == id)
+    }
 }
 
 pub fn token_hash(token: &str) -> String {
