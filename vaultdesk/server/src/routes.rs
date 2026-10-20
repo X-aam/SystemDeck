@@ -42,6 +42,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/recordings/{id}/finish", post(recording_finish))
         .route("/api/admin/recordings", get(admin_recordings))
         .route("/api/admin/recordings/{id}", get(admin_recording_data).delete(admin_delete_recording))
+        .route("/api/admin/recordings/{id}/summarize", post(admin_summarize_recording))
         .route("/api/admin/users", get(admin_users).post(admin_create_user))
         .route("/api/admin/users/{username}", put(admin_update_user))
         .route("/api/admin/users/{username}/revoke", post(admin_revoke_sessions))
@@ -448,6 +449,8 @@ async fn recording_start(State(st): State<AppState>, auth: AuthUser, Json(req): 
         finished: false,
         kind: req.kind,
         protocol: if req.protocol.is_empty() { "SSH".into() } else { req.protocol },
+        summary: None,
+        flags: Vec::new(),
     };
     st.db.put_recording(&meta)?;
     tracing::info!(user = %meta.username, host = %meta.host, protocol = %meta.protocol, recording = %meta.id, "session recording started");
@@ -512,6 +515,109 @@ async fn admin_delete_recording(State(st): State<AppState>, AdminUser(admin): Ad
     tracing::info!(admin = %admin.username, recording = %id, "recording deleted");
     st.db.audit(&admin.username, "recording_delete", &id.to_string(), "");
     Ok(ok())
+}
+
+/// AI: summarise a recording and flag sensitive actions, caching the result.
+async fn admin_summarize_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<RecordingMeta>> {
+    let ai = st.ai.as_ref().ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured on this server (set --ai-url)"))?;
+    let mut meta = st.db.recording(id)?.ok_or_else(|| ApiError::not_found("recording not found"))?;
+    let data = st.db.read_recording(id)?;
+    let transcript = transcript_for_ai(meta.kind, &data);
+    if transcript.trim().is_empty() {
+        return Err(ApiError::bad_request("this recording has no readable transcript to summarise"));
+    }
+    let result = ai
+        .summarise(&meta.protocol, &meta.username, &meta.host, &transcript)
+        .await
+        .map_err(|e| ApiError::new(axum::http::StatusCode::BAD_GATEWAY, format!("AI request failed: {e:#}")))?;
+    meta.summary = Some(result.summary);
+    meta.flags = result.flags;
+    st.db.put_recording(&meta)?;
+    tracing::info!(admin = %admin.username, recording = %id, flags = meta.flags.len(), "recording summarised");
+    st.db.audit(&admin.username, "recording_summarise", &format!("{} on {}", meta.username, meta.host), &format!("{} flag(s)", meta.flags.len()));
+    Ok(Json(meta))
+}
+
+/// Builds a plain-text transcript for the model from a recording's bytes.
+/// SSH: the terminal output (ANSI stripped). Screen/DOM: typed text, key
+/// combinations, clicks and pages visited. Capped so the prompt stays small.
+fn transcript_for_ai(kind: RecordingKind, data: &[u8]) -> String {
+    const MAX: usize = 16_000;
+    let text = String::from_utf8_lossy(data);
+    let mut out = String::new();
+    for line in text.lines() {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
+        match kind {
+            RecordingKind::Ssh => {
+                // asciicast events: [t, "o"|"i", data]; collect terminal output.
+                if v.get(1).and_then(Value::as_str) == Some("o") {
+                    if let Some(s) = v.get(2).and_then(Value::as_str) {
+                        out.push_str(&strip_ansi(s));
+                    }
+                }
+            }
+            RecordingKind::Screen => {
+                let (kind_s, data_s) = (v.get(1).and_then(Value::as_str), v.get(2).and_then(Value::as_str));
+                match (kind_s, data_s) {
+                    (Some("i"), Some(d)) => out.push_str(&strip_ansi(d)),
+                    (Some("k"), Some(d)) => out.push_str(&format!("[key {d}]\n")),
+                    (Some("m"), Some(d)) => out.push_str(&format!("[click {d}]\n")),
+                    _ => {}
+                }
+            }
+            RecordingKind::Dom => {
+                // rrweb custom "url" events mark each page visited.
+                if v.get("type").and_then(Value::as_i64) == Some(5) {
+                    if let Some(d) = v.get("data") {
+                        if d.get("tag").and_then(Value::as_str) == Some("url") {
+                            if let Some(u) = d.get("payload").and_then(Value::as_str) {
+                                out.push_str(&format!("visited {u}\n"));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if out.len() > MAX * 2 {
+            break;
+        }
+    }
+    // Keep the most recent part if very long.
+    if out.len() > MAX {
+        out = out[out.len() - MAX..].to_string();
+    }
+    out
+}
+
+/// Removes ANSI escape sequences (colours, cursor moves) from terminal text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            if chars.peek() == Some(&'[') {
+                chars.next();
+                // CSI: consume parameters until a final byte (@ to ~).
+                while let Some(&n) = chars.peek() {
+                    chars.next();
+                    if ('@'..='~').contains(&n) {
+                        break;
+                    }
+                }
+            } else {
+                // OSC / other: skip to BEL or the next ESC.
+                while let Some(&n) = chars.peek() {
+                    if n == '\u{07}' || n == '\u{1b}' {
+                        break;
+                    }
+                    chars.next();
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn clean_members(members: Vec<String>) -> Vec<String> {

@@ -64,10 +64,31 @@ dashboard is compiled into the server binary and needs no internet access.
 - **Vaults & access**: create, rename or delete vaults, grant Read / Read & write / Manage to
   teams or users, and list a vault's entries. Passwords are never sent to the dashboard.
 
-- **Session recordings**: replay SSH/RDP/VNC sessions (see *Session recording* below).
+- **Session recordings**: replay SSH/RDP/VNC/web sessions (see *Session recording* below).
+  With an AI endpoint configured, each recording can be **summarised** and its sensitive
+  actions (sudo, user/password changes, deletes, firewall/service changes) flagged for review.
+- **Audit log**: every server action — logins (and failures), logouts, password changes, entry
+  and vault/team/user changes, recording views/deletes, downloads — filterable by user and action.
 - **Download app**: every signed-in user (staff too, who see only this page) can download
   `SystemDeck-Client.zip`. `build.ps1` puts it in the server's `downloads\` folder
   (`--downloads-dir` to use another folder).
+
+### AI (optional, self-hosted)
+
+Point the server at a local OpenAI-compatible LLM and nothing leaves your network:
+
+```powershell
+$env:SYSTEMDECK_AI_URL = "http://localhost:11434/v1"   # Ollama / llama.cpp / vLLM / LM Studio
+$env:SYSTEMDECK_AI_MODEL = "llama3.1"
+```
+
+Enables **recording summaries + sensitive-action flagging** on the dashboard. Leave `SYSTEMDECK_AI_URL`
+unset to disable AI (the feature then returns a clear "not configured" message).
+
+### Retention (optional)
+
+`SYSTEMDECK_RECORDING_RETENTION_DAYS` and `SYSTEMDECK_AUDIT_RETENTION_DAYS` (0 = keep forever)
+prune old recordings/audit entries on startup and once a day.
 
 It uses the same JSON API as the desktop client and is served with a strict
 Content-Security-Policy (own scripts only, no framing). Use HTTPS (reverse proxy) when you

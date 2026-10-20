@@ -167,3 +167,9 @@ code { font-family: ui-monospace, Consolas, monospace; background: var(--hover);
 .badge.neutral { background: var(--hover); color: var(--muted); }
 .badge.warn-badge { background: rgba(230, 160, 40, .16); color: #e0a028; }
 .badge.danger-badge { background: rgba(232, 84, 92, .16); color: var(--danger); }
+
+/* AI recording summary */
+.ai-summary { background: var(--hover); border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; margin-bottom: 10px; }
+.ai-summary .ai-text { font-size: 13.5px; line-height: 1.5; }
+.ai-summary .ai-flags { margin: 8px 0 8px 18px; color: var(--danger); font-size: 13px; }
+.ai-summary button { margin-top: 8px; }

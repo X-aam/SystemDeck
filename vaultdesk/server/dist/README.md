@@ -24,6 +24,20 @@ systemdeck-server.exe --data-dir .\data --bind 0.0.0.0:8740
 systemdeck-server.exe --data-dir .\data --reset-password admin
 ```
 
+### Retention and AI (optional)
+
+Set these as environment variables (or `--flags`):
+
+```
+SYSTEMDECK_RECORDING_RETENTION_DAYS=30   delete finished recordings older than N days
+SYSTEMDECK_AUDIT_RETENTION_DAYS=365      delete audit entries older than N days
+SYSTEMDECK_AI_URL=http://localhost:11434/v1   local OpenAI-compatible LLM (Ollama/llama.cpp/vLLM)
+SYSTEMDECK_AI_MODEL=llama3.1              model name for the AI endpoint
+```
+
+With `SYSTEMDECK_AI_URL` set, the dashboard's **Session recordings** can summarise a
+session and flag sensitive actions, all on your own network. Leave it unset to disable AI.
+
 ## Back up
 
 Copy the whole `data` folder: `systemdeck.redb` (database), `server.key` (encryption key)

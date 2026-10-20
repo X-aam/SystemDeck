@@ -1,5 +1,6 @@
 //! SystemDeck team server: stores shared vaults and syncs them to desktop clients.
 
+mod ai;
 mod auth;
 mod error;
 mod routes;
@@ -52,11 +53,25 @@ struct Args {
     /// Delete audit-log entries older than this many days (0 = keep forever).
     #[arg(long, default_value_t = 0, env = "SYSTEMDECK_AUDIT_RETENTION_DAYS")]
     audit_retention_days: i64,
+
+    /// OpenAI-compatible LLM endpoint for AI features, ending in /v1
+    /// (e.g. http://localhost:11434/v1 for Ollama). Empty = AI disabled.
+    #[arg(long, env = "SYSTEMDECK_AI_URL")]
+    ai_url: Option<String>,
+
+    /// Model name for the AI endpoint (e.g. llama3.1, qwen2.5).
+    #[arg(long, env = "SYSTEMDECK_AI_MODEL")]
+    ai_model: Option<String>,
+
+    /// Optional bearer key for the AI endpoint.
+    #[arg(long, env = "SYSTEMDECK_AI_KEY")]
+    ai_key: Option<String>,
 }
 
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Db>,
+    pub ai: Option<crate::ai::Ai>,
     pub downloads: PathBuf,
     pub started_at: Instant,
     /// Last authenticated request per user (in memory; drives "online now").
@@ -120,7 +135,11 @@ async fn main() -> Result<()> {
         });
     }
 
-    let state = AppState { db, downloads, started_at: Instant::now(), last_seen: Arc::new(Mutex::new(HashMap::new())) };
+    let ai = ai::Ai::new(args.ai_url, args.ai_model, args.ai_key);
+    if let Some(ai) = &ai {
+        tracing::info!("AI features enabled (model {})", ai.model());
+    }
+    let state = AppState { db, ai, downloads, started_at: Instant::now(), last_seen: Arc::new(Mutex::new(HashMap::new())) };
     let app = routes::router(state);
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await

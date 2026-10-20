@@ -558,7 +558,8 @@ function renderRecordings() {
         const kind = { SSH: "Ssh", RDP: "Rdp", VNC: "Vnc", WEB: "Web" }[p] || "Ssh";
         return h("span", { class: "badge kind", style: `background:${KIND_COLORS[kind]}` }, p);
       })()),
-      h("td", {}, h("div", {}, r.entry_name), h("div", { class: "muted" }, `${r.login ? r.login + "@" : ""}${r.host} · ${r.vault_name}`)),
+      h("td", {}, h("div", {}, r.entry_name, r.flags && r.flags.length ? h("span", { class: "badge danger-badge", style: "margin-left:8px", title: r.flags.join("\n") }, `⚑ ${r.flags.length}`) : null),
+        h("div", { class: "muted" }, `${r.login ? r.login + "@" : ""}${r.host} · ${r.vault_name}`)),
       h("td", {}, fmtBytes(r.bytes)),
       h("td", {}, live ? h("span", { class: "rec" }, "● live") : r.finished ? "Finished" : h("span", { class: "muted" }, "Ended (no clean close)")),
       h("td", {}, h("div", { class: "row-actions" },
@@ -570,6 +571,43 @@ function renderRecordings() {
   $("view").replaceChildren(h("div", { class: "table-wrap" }, h("table", {},
     h("thead", {}, h("tr", {}, h("th", {}, "Started"), h("th", {}, "User"), h("th", {}, "Type"), h("th", {}, "Target"), h("th", {}, "Size"), h("th", {}, "Status"), h("th", {}))),
     h("tbody", {}, rows))));
+}
+
+// AI summary panel shown at the top of a recording view.
+function aiBar(r) {
+  const box = h("div", { class: "ai-summary" });
+  const draw = () => {
+    box.replaceChildren();
+    if (r.summary) {
+      box.append(h("div", { class: "ai-text" }, h("b", {}, "AI summary: "), r.summary));
+      if (r.flags && r.flags.length) {
+        box.append(h("ul", { class: "ai-flags" }, r.flags.map((f) => h("li", {}, f))));
+      }
+    } else {
+      box.append(h("div", { class: "muted" }, "No AI summary yet."));
+    }
+    const btn = h("button", { class: "small" }, r.summary ? "Re-summarise" : "Summarise with AI");
+    btn.addEventListener("click", async () => {
+      btn.disabled = true;
+      btn.textContent = "Summarising…";
+      try {
+        const updated = await api("POST", `/api/admin/recordings/${r.id}/summarize`);
+        r.summary = updated.summary;
+        r.flags = updated.flags || [];
+        const row = state.recordings.find((x) => x.id === r.id);
+        if (row) { row.summary = r.summary; row.flags = r.flags; }
+        toast("Summary ready");
+        draw();
+      } catch (e) {
+        toast(e.message, true);
+        btn.disabled = false;
+        btn.textContent = r.summary ? "Re-summarise" : "Summarise with AI";
+      }
+    });
+    box.append(btn);
+  };
+  draw();
+  return box;
 }
 
 async function fetchCast(r) {
@@ -720,7 +758,7 @@ async function viewScreenRecording(r, cast) {
       h("span", { class: "t" }, `${t.toFixed(1)}s`), h("span", { class: `act ${kind}` }, kind), text || h("span", { class: "muted" }, "(Enter)")))
     : [h("p", { class: "muted" }, "No typing or clicks recorded.")]);
 
-  const replayPane = h("div", {}, h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel), stage);
+  const replayPane = h("div", {}, aiBar(r), h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel), stage);
   const keysPane = h("div", { class: "hidden" }, h("p", { class: "muted" }, "Typed text (Enter-separated), key combinations and clicks. Click a line to see the screen at that moment. Typed passwords appear here too."), keysBox);
   const tabReplay = h("button", { class: "on" }, "Replay screen");
   const tabKeys = h("button", {}, `Activity (${activity.length})`);
@@ -733,7 +771,7 @@ async function viewScreenRecording(r, cast) {
 
   draw();
   modal(`${r.username} → ${r.protocol || "RDP"} ${r.login ? r.login + "@" : ""}${r.host}  ·  ${new Date(r.started_at).toLocaleString()}`,
-    h("div", {}, h("div", { class: "tabs" }, tabReplay, tabKeys, h("button", { class: "right", onclick: () => downloadRecording(r) }, "Download")), replayPane, keysPane),
+    h("div", {}, aiBar(r), h("div", { class: "tabs" }, tabReplay, tabKeys, h("button", { class: "right", onclick: () => downloadRecording(r) }, "Download")), replayPane, keysPane),
     "Close", async () => { stop(); }, { wide: true });
   $("modal-cancel").classList.add("hidden");
   const observer = new MutationObserver(() => { if ($("modal-backdrop").classList.contains("hidden")) { stop(); observer.disconnect(); } });
@@ -763,7 +801,7 @@ async function viewDomRecording(r) {
   };
   window.addEventListener("message", onMsg);
   modal(`${r.username} → web ${r.host}  ·  ${new Date(r.started_at).toLocaleString()}`,
-    h("div", {}, h("div", { class: "tabs" }, h("span", { class: "muted" }, `${events.length} events`), h("button", { class: "right", onclick: () => downloadRecording(r) }, "Download")), frame),
+    h("div", {}, aiBar(r), h("div", { class: "tabs" }, h("span", { class: "muted" }, `${events.length} events`), h("button", { class: "right", onclick: () => downloadRecording(r) }, "Download")), frame),
     "Close", async () => { window.removeEventListener("message", onMsg); }, { wide: true });
   $("modal-cancel").classList.add("hidden");
   const observer = new MutationObserver(() => { if ($("modal-backdrop").classList.contains("hidden")) { window.removeEventListener("message", onMsg); observer.disconnect(); } });
@@ -807,7 +845,7 @@ async function viewRecording(r) {
   speedSel.addEventListener("change", () => { speed = Number(speedSel.value); });
   const endBtn = h("button", { onclick: () => { stop(); seek(total); } }, "Show all");
 
-  const replayPane = h("div", {}, h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel, endBtn), pre);
+  const replayPane = h("div", {}, aiBar(r), h("div", { class: "tabs" }, playBtn, speedSel, pos, timeLabel, endBtn), pre);
   const keysPane = h("div", { class: "hidden" }, h("p", { class: "muted" }, "Lines typed by the user (Enter-separated). Typed passwords appear here too."), keysBox);
   const tabReplay = h("button", { class: "on" }, "Replay screen");
   const tabKeys = h("button", {}, `Typed commands (${typed.length})`);
@@ -816,7 +854,7 @@ async function viewRecording(r) {
 
   seek(total);
   modal(`${r.username} → ${r.login ? r.login + "@" : ""}${r.host}  ·  ${new Date(r.started_at).toLocaleString()}`,
-    h("div", {}, h("div", { class: "tabs" }, tabReplay, tabKeys, h("button", { class: "right", onclick: () => downloadRecording(r) }, "Download .cast")), replayPane, keysPane),
+    h("div", {}, aiBar(r), h("div", { class: "tabs" }, tabReplay, tabKeys, h("button", { class: "right", onclick: () => downloadRecording(r) }, "Download .cast")), replayPane, keysPane),
     "Close", async () => { stop(); }, { wide: true });
   $("modal-cancel").classList.add("hidden");
   const observer = new MutationObserver(() => { if ($("modal-backdrop").classList.contains("hidden")) { stop(); observer.disconnect(); } });

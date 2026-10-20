@@ -216,4 +216,10 @@ pub struct RecordingMeta {
     pub kind: RecordingKind,
     #[serde(default)]
     pub protocol: String,
+    /// AI-generated summary of the session, once requested (None = not yet).
+    #[serde(default)]
+    pub summary: Option<String>,
+    /// AI-flagged sensitive actions in the session.
+    #[serde(default)]
+    pub flags: Vec<String>,
 }
