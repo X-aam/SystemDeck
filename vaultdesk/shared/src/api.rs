@@ -145,30 +145,51 @@ pub struct VaultRequest {
     pub record_ssh: Option<bool>,
 }
 
-/// One AI model as shown in Settings (the key is never returned).
+/// One AI API endpoint as shown in Settings (the key is never returned).
 #[derive(Serialize, Deserialize, Clone, Default)]
-pub struct AiProviderInfo {
+pub struct AiEndpointInfo {
     pub id: String,
     pub label: String,
     pub url: String,
-    pub model: String,
     pub key_set: bool,
+}
+
+/// One model shown in Settings, served by an endpoint.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AiModelInfo {
+    pub id: String,
+    pub label: String,
+    /// Id of the endpoint this model is served by.
+    pub endpoint: String,
+    pub model: String,
+}
+
+/// Which models one user may use.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AiUserAccess {
+    pub username: String,
+    pub models: Vec<String>,
 }
 
 /// Server configuration shown in the dashboard Settings page.
 #[derive(Serialize, Deserialize, Clone, Default)]
 pub struct ServerConfig {
-    pub ai_providers: Vec<AiProviderInfo>,
-    pub ai_default: String,
     pub ai_enabled: bool,
+    pub ai_endpoints: Vec<AiEndpointInfo>,
+    pub ai_models: Vec<AiModelInfo>,
+    pub ai_default: String,
+    /// Per-user model grants (admins always have access to all models).
+    pub ai_access: Vec<AiUserAccess>,
+    /// Non-admin usernames, for the access-assignment UI.
+    pub users: Vec<String>,
     pub recording_retention_days: i64,
     pub audit_retention_days: i64,
 }
 
-/// One model in a config update. An absent/empty `key` keeps the existing key
-/// for that `id`; `id` absent means a new model.
+/// One endpoint in a config update. An absent/empty `key` keeps the existing
+/// key for that `id`; `id` absent means a new endpoint.
 #[derive(Serialize, Deserialize, Default)]
-pub struct AiProviderInput {
+pub struct AiEndpointInput {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -176,19 +197,33 @@ pub struct AiProviderInput {
     #[serde(default)]
     pub url: String,
     #[serde(default)]
-    pub model: String,
-    #[serde(default)]
     pub key: Option<String>,
+}
+
+/// One model in a config update. `id` absent means a new model.
+#[derive(Serialize, Deserialize, Default)]
+pub struct AiModelInput {
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub endpoint: String,
+    #[serde(default)]
+    pub model: String,
 }
 
 /// Config changes from the dashboard. `None` leaves that part unchanged.
 #[derive(Serialize, Deserialize, Default)]
 pub struct ServerConfigUpdate {
-    /// Full replacement of the model list when present.
     #[serde(default)]
-    pub ai_providers: Option<Vec<AiProviderInput>>,
+    pub ai_endpoints: Option<Vec<AiEndpointInput>>,
+    #[serde(default)]
+    pub ai_models: Option<Vec<AiModelInput>>,
     #[serde(default)]
     pub ai_default: Option<String>,
+    #[serde(default)]
+    pub ai_access: Option<Vec<AiUserAccess>>,
     #[serde(default)]
     pub recording_retention_days: Option<i64>,
     #[serde(default)]

@@ -65,17 +65,58 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
 }
 
-/// One configured AI model/endpoint.
+/// Legacy flat model row (pre-endpoint restructure); migrated on read.
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct AiProvider {
+    pub id: String,
+    pub label: String,
+    pub url: String,
+    pub model: String,
+    pub key: String,
+}
+
+/// An AI API: one OpenAI-compatible endpoint (URL + optional key). A single
+/// endpoint (e.g. Ollama) can serve many models.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct AiEndpoint {
     pub id: String,
     /// Friendly name shown in the UI.
     pub label: String,
     /// OpenAI-compatible base URL ending in /v1.
     pub url: String,
+    pub key: String,
+}
+
+/// A model offered to users: a model name served by one endpoint.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct AiModelCfg {
+    pub id: String,
+    pub label: String,
+    /// Id of the endpoint this model is served by.
+    pub endpoint: String,
+    pub model: String,
+}
+
+/// Which models a user may use (admins may use all). No entry = no access.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct AiAccess {
+    pub username: String,
+    pub models: Vec<String>,
+}
+
+/// A model joined with its endpoint, ready to build an [`crate::ai::Ai`].
+#[derive(Clone, Default)]
+pub struct ResolvedModel {
+    pub id: String,
+    pub label: String,
+    pub url: String,
     pub model: String,
     pub key: String,
+    pub endpoint: String,
 }
 
 /// Server settings edited from the dashboard (sealed at rest). Source of truth;
@@ -83,12 +124,18 @@ pub struct AiProvider {
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct Config {
-    /// Configured models; the first or `ai_default` is used by default.
-    pub ai_providers: Vec<AiProvider>,
+    /// API endpoints, and the models they serve.
+    pub ai_endpoints: Vec<AiEndpoint>,
+    pub ai_models: Vec<AiModelCfg>,
+    /// Per-user model grants (admins always have access to all models).
+    pub ai_access: Vec<AiAccess>,
+    /// Default model id (used when a request names none).
     pub ai_default: String,
     pub recording_retention_days: i64,
     pub audit_retention_days: i64,
-    // Legacy single-endpoint fields (pre-multi-model); migrated on read.
+    // Legacy fields, migrated on read.
+    #[serde(default)]
+    pub ai_providers: Vec<AiProvider>,
     #[serde(default)]
     pub ai_url: String,
     #[serde(default)]
@@ -97,9 +144,17 @@ pub struct Config {
     pub ai_key: String,
 }
 
+/// A label for an endpoint, derived from its host.
+pub(crate) fn endpoint_label(url: &str) -> String {
+    let host = url.trim().trim_start_matches("https://").trim_start_matches("http://");
+    let host = host.split('/').next().unwrap_or(host);
+    if host.is_empty() { "Endpoint".to_string() } else { host.to_string() }
+}
+
 impl Config {
-    /// All models, with the legacy single endpoint surfaced as one provider.
-    pub fn providers(&self) -> Vec<AiProvider> {
+    /// Legacy flat models: the old `ai_providers`, or the even older single
+    /// endpoint. Used only to migrate deployments made before the restructure.
+    fn legacy_providers(&self) -> Vec<AiProvider> {
         let mut v = self.ai_providers.clone();
         if v.is_empty() && !self.ai_url.trim().is_empty() {
             v.push(AiProvider {
@@ -113,14 +168,75 @@ impl Config {
         v
     }
 
-    /// The default model (chosen one, else the first configured).
-    pub fn default_provider(&self) -> Option<AiProvider> {
-        let ps = self.providers();
-        ps.iter().find(|p| p.id == self.ai_default).cloned().or_else(|| ps.into_iter().next())
+    /// Configured endpoints, migrating legacy flat models into endpoints
+    /// (deduplicated by URL + key) when none are stored yet.
+    pub fn endpoints(&self) -> Vec<AiEndpoint> {
+        if !self.ai_endpoints.is_empty() {
+            return self.ai_endpoints.clone();
+        }
+        let mut eps: Vec<AiEndpoint> = Vec::new();
+        for p in self.legacy_providers() {
+            if p.url.trim().is_empty() || eps.iter().any(|e| e.url == p.url && e.key == p.key) {
+                continue;
+            }
+            eps.push(AiEndpoint { id: format!("ep{}", eps.len() + 1), label: endpoint_label(&p.url), url: p.url.clone(), key: p.key.clone() });
+        }
+        eps
     }
 
-    pub fn provider(&self, id: &str) -> Option<AiProvider> {
-        self.providers().into_iter().find(|p| p.id == id)
+    /// All models joined with their endpoint. Migrates legacy flat models.
+    pub fn models(&self) -> Vec<ResolvedModel> {
+        let eps = self.endpoints();
+        let join = |label: String, model: String, ep: &AiEndpoint, id: String| ResolvedModel {
+            id,
+            label: if label.trim().is_empty() { model.clone() } else { label },
+            url: ep.url.clone(),
+            model,
+            key: ep.key.clone(),
+            endpoint: ep.id.clone(),
+        };
+        if !self.ai_models.is_empty() {
+            return self
+                .ai_models
+                .iter()
+                .filter_map(|m| eps.iter().find(|e| e.id == m.endpoint).map(|ep| join(m.label.clone(), m.model.clone(), ep, m.id.clone())))
+                .collect();
+        }
+        // Migrate: each legacy provider becomes a model on its endpoint.
+        self.legacy_providers()
+            .into_iter()
+            .filter_map(|p| eps.iter().find(|e| e.url == p.url && e.key == p.key).map(|ep| join(p.label.clone(), p.model.clone(), ep, p.id.clone())))
+            .collect()
+    }
+
+    pub fn endpoint(&self, id: &str) -> Option<AiEndpoint> {
+        self.endpoints().into_iter().find(|e| e.id == id)
+    }
+
+    pub fn model(&self, id: &str) -> Option<ResolvedModel> {
+        self.models().into_iter().find(|m| m.id == id)
+    }
+
+    /// The default model (chosen one, else the first configured).
+    pub fn default_model(&self) -> Option<ResolvedModel> {
+        let ms = self.models();
+        ms.iter().find(|m| m.id == self.ai_default).cloned().or_else(|| ms.into_iter().next())
+    }
+
+    /// Models a user may use: all for admins, else only those granted. Locked
+    /// down by default (an unlisted user gets nothing).
+    pub fn allowed_models(&self, username: &str, is_admin: bool) -> Vec<ResolvedModel> {
+        let all = self.models();
+        if is_admin {
+            return all;
+        }
+        let granted: std::collections::HashSet<String> = self
+            .ai_access
+            .iter()
+            .filter(|a| a.username.eq_ignore_ascii_case(username))
+            .flat_map(|a| a.models.iter().cloned())
+            .collect();
+        all.into_iter().filter(|m| granted.contains(&m.id)).collect()
     }
 }
 

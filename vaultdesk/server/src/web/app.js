@@ -917,77 +917,145 @@ async function renderAudit() {
 
 // ---------- settings ----------
 
+function uid() {
+  try { return crypto.randomUUID(); } catch (e) { return "id" + Date.now() + Math.random().toString(16).slice(2); }
+}
+
 async function renderSettings() {
-  setHeader("Settings", "Server configuration — AI models and retention");
+  setHeader("Settings", "Server configuration — AI endpoints, models, access and retention");
   let cfg;
   try { cfg = await api("GET", "/api/admin/config"); } catch (e) { toast(e.message, true); return; }
 
-  // Working copy; keys stay blank (blank = keep the stored key).
-  let providers = (cfg.ai_providers || []).map((p) => ({ id: p.id, label: p.label, url: p.url, model: p.model, key_set: p.key_set, key: "" }));
-  let def = cfg.ai_default || (providers[0] && providers[0].id) || "";
+  // Working copies; endpoint keys stay blank (blank = keep the stored key).
+  let endpoints = (cfg.ai_endpoints || []).map((e) => ({ id: e.id, label: e.label, url: e.url, key_set: e.key_set, key: "" }));
+  let models = (cfg.ai_models || []).map((m) => ({ id: m.id, label: m.label, endpoint: m.endpoint, model: m.model }));
+  let def = cfg.ai_default || (models[0] && models[0].id) || "";
+  const users = cfg.users || [];
+  // access: username -> Set(model ids)
+  const access = {};
+  (cfg.ai_access || []).forEach((a) => { access[a.username] = new Set(a.models || []); });
 
-  const list = h("div", {});
-  const drawModels = () => {
-    if (!providers.length) { list.replaceChildren(h("p", { class: "muted" }, "No models yet. Add one to enable AI.")); return; }
-    list.replaceChildren(...providers.map((p, i) => {
-      const label = h("input", { value: p.label || "", placeholder: "name, e.g. Local Llama" });
-      const url = h("input", { value: p.url || "", placeholder: "http://localhost:11434/v1" });
-      const model = h("input", { value: p.model || "", placeholder: "llama3.1" });
-      const key = h("input", { type: "password", placeholder: p.key_set ? "•••• set — blank keeps it" : "(none)" });
-      label.addEventListener("input", () => (p.label = label.value));
-      url.addEventListener("input", () => (p.url = url.value));
-      model.addEventListener("input", () => (p.model = model.value));
-      key.addEventListener("input", () => (p.key = key.value));
-      const defRadio = h("input", { type: "radio", name: "defmodel" });
-      defRadio.checked = def === p.id || (!def && i === 0);
-      defRadio.addEventListener("change", () => { def = p.id || ""; });
+  const epList = h("div", {});
+  const modelList = h("div", {});
+  const accessList = h("div", {});
+
+  const endpointName = (e) => (e && (e.label || e.url)) || "(unnamed endpoint)";
+
+  // ---- endpoints ----
+  const drawEndpoints = () => {
+    if (!endpoints.length) { epList.replaceChildren(h("p", { class: "muted" }, "No endpoints yet. Add one (e.g. your Ollama server), then fetch its models.")); return; }
+    epList.replaceChildren(...endpoints.map((e, i) => {
+      const label = h("input", { value: e.label || "", placeholder: "name, e.g. Local Ollama" });
+      const url = h("input", { value: e.url || "", placeholder: "http://localhost:11434/v1" });
+      const key = h("input", { type: "password", placeholder: e.key_set ? "•••• set — blank keeps it" : "(none)" });
+      label.addEventListener("input", () => (e.label = label.value));
+      url.addEventListener("input", () => (e.url = url.value));
+      key.addEventListener("input", () => (e.key = key.value));
       const out = h("span", { class: "muted" });
-      const test = h("button", { class: "small" }, "Test");
-      test.addEventListener("click", async () => {
-        out.className = "muted"; out.textContent = "Testing…";
-        try {
-          const r = await api("POST", "/api/admin/config/test-ai", { url: p.url, model: p.model, key: p.key, id: p.id });
-          out.className = r.ok ? "ok-text" : "error";
-          out.textContent = r.ok ? "OK — " + (r.reply || "reachable") : "Failed: " + r.error;
-        } catch (e) { out.className = "error"; out.textContent = "Failed: " + e.message; }
-      });
-      const rm = h("button", { class: "small danger" }, "Remove");
-      rm.addEventListener("click", () => { providers.splice(i, 1); drawModels(); });
-      // One endpoint often serves many models: list them and add with one click.
       const chips = h("div", { class: "model-chips" });
       const fetchBtn = h("button", { class: "small" }, "Fetch models");
       fetchBtn.addEventListener("click", async () => {
+        out.className = "muted"; out.textContent = "";
         chips.replaceChildren(h("span", { class: "muted" }, "Loading…"));
         try {
-          const r = await api("POST", "/api/admin/config/list-models", { url: p.url, key: p.key, id: p.id });
+          const r = await api("POST", "/api/admin/config/list-models", { url: e.url, key: e.key, endpoint: e.id });
           if (!r.ok) { chips.replaceChildren(h("span", { class: "error" }, "Failed: " + r.error)); return; }
           if (!r.models || !r.models.length) { chips.replaceChildren(h("span", { class: "muted" }, "This endpoint reported no models")); return; }
           chips.replaceChildren(
-            h("span", { class: "muted" }, "Click to use (reuses this URL & key):"),
-            ...r.models.map((m) => {
-              const chip = h("button", { class: "small chip" }, m);
+            h("span", { class: "muted" }, "Add a model:"),
+            ...r.models.map((name) => {
+              const chip = h("button", { class: "small chip" }, name);
               chip.addEventListener("click", () => {
-                if (!p.model) { p.model = m; if (!p.label) p.label = m; }
-                else { providers.push({ id: "", label: m, url: p.url, model: m, key_set: p.key_set, key: p.key }); }
-                drawModels();
+                if (!models.some((m) => m.endpoint === e.id && m.model === name)) {
+                  models.push({ id: uid(), label: name, endpoint: e.id, model: name });
+                  if (!def) def = models[0].id;
+                  drawModels(); drawAccess();
+                }
               });
               return chip;
             })
           );
-        } catch (e) { chips.replaceChildren(h("span", { class: "error" }, "Failed: " + e.message)); }
+        } catch (ex) { chips.replaceChildren(h("span", { class: "error" }, "Failed: " + ex.message)); }
+      });
+      const rm = h("button", { class: "small danger" }, "Remove");
+      rm.addEventListener("click", () => {
+        endpoints.splice(i, 1);
+        models = models.filter((m) => m.endpoint !== e.id); // models need an endpoint
+        drawEndpoints(); drawModels(); drawAccess();
       });
       return h("div", { class: "model-row" },
         h("div", { class: "model-grid" },
-          h("label", {}, "Name", label), h("label", {}, "Model", model),
-          h("label", {}, "Endpoint URL (ends in /v1)", url), h("label", {}, "API key (optional)", key)),
-        h("div", { class: "model-actions" }, h("label", { class: "check" }, defRadio, "Default"), fetchBtn, test, out, h("span", { class: "grow" }), rm),
+          h("label", {}, "Name", label), h("label", {}, "Endpoint URL (ends in /v1)", url), h("label", {}, "API key (optional)", key)),
+        h("div", { class: "model-actions" }, fetchBtn, rm, h("span", { class: "grow" }), out),
         chips);
     }));
   };
-  drawModels();
 
-  const add = h("button", { class: "small" }, "+ Add model");
-  add.addEventListener("click", () => { providers.push({ id: "", label: "", url: "", model: "", key_set: false, key: "" }); drawModels(); });
+  // ---- models ----
+  const drawModels = () => {
+    if (!endpoints.length) { modelList.replaceChildren(h("p", { class: "muted" }, "Add an endpoint first.")); return; }
+    if (!models.length) { modelList.replaceChildren(h("p", { class: "muted" }, "No models yet. Use an endpoint's “Fetch models”, or add one below.")); return; }
+    modelList.replaceChildren(...models.map((m, i) => {
+      const label = h("input", { value: m.label || "", placeholder: "name shown to users" });
+      const name = h("input", { value: m.model || "", placeholder: "llama3.1" });
+      label.addEventListener("input", () => (m.label = label.value));
+      name.addEventListener("input", () => (m.model = name.value));
+      const sel = h("select", {}, ...endpoints.map((e) => h("option", { value: e.id }, endpointName(e))));
+      sel.value = m.endpoint;
+      sel.addEventListener("change", () => (m.endpoint = sel.value));
+      const defRadio = h("input", { type: "radio", name: "defmodel" });
+      defRadio.checked = def === m.id;
+      defRadio.addEventListener("change", () => { def = m.id; });
+      const out = h("span", { class: "muted" });
+      const test = h("button", { class: "small" }, "Test");
+      test.addEventListener("click", async () => {
+        const e = endpoints.find((x) => x.id === m.endpoint) || {};
+        out.className = "muted"; out.textContent = "Testing…";
+        try {
+          const r = await api("POST", "/api/admin/config/test-ai", { url: e.url, key: e.key, endpoint: m.endpoint, model: m.model });
+          out.className = r.ok ? "ok-text" : "error";
+          out.textContent = r.ok ? "OK — " + (r.reply || "reachable") : "Failed: " + r.error;
+        } catch (ex) { out.className = "error"; out.textContent = "Failed: " + ex.message; }
+      });
+      const rm = h("button", { class: "small danger" }, "Remove");
+      rm.addEventListener("click", () => {
+        const id = m.id;
+        models.splice(i, 1);
+        Object.values(access).forEach((s) => s.delete(id));
+        if (def === id) def = models[0] ? models[0].id : "";
+        drawModels(); drawAccess();
+      });
+      return h("div", { class: "model-row" },
+        h("div", { class: "model-grid" },
+          h("label", {}, "Name", label), h("label", {}, "Model", name), h("label", {}, "Endpoint", sel)),
+        h("div", { class: "model-actions" }, h("label", { class: "check" }, defRadio, "Default"), test, out, h("span", { class: "grow" }), rm));
+    }));
+  };
+
+  // ---- per-user access ----
+  const drawAccess = () => {
+    if (!models.length) { accessList.replaceChildren(h("p", { class: "muted" }, "Add a model first, then grant users access to it.")); return; }
+    if (!users.length) { accessList.replaceChildren(h("p", { class: "muted" }, "No non-admin users yet. Administrators can use every model.")); return; }
+    accessList.replaceChildren(...users.map((u) => {
+      const set = access[u] || (access[u] = new Set());
+      const boxes = models.map((m) => {
+        const cb = h("input", { type: "checkbox" });
+        cb.checked = set.has(m.id);
+        cb.addEventListener("change", () => { cb.checked ? set.add(m.id) : set.delete(m.id); });
+        return h("label", { class: "check" }, cb, m.label || m.model);
+      });
+      return h("div", { class: "access-row" },
+        h("div", { class: "access-user" }, u),
+        h("div", { class: "access-models" }, ...boxes));
+    }));
+  };
+
+  drawEndpoints(); drawModels(); drawAccess();
+
+  const addEp = h("button", { class: "small" }, "+ Add endpoint");
+  addEp.addEventListener("click", () => { endpoints.push({ id: uid(), label: "", url: "", key_set: false, key: "" }); drawEndpoints(); drawModels(); });
+  const addModel = h("button", { class: "small" }, "+ Add model");
+  addModel.addEventListener("click", () => { models.push({ id: uid(), label: "", endpoint: endpoints[0] ? endpoints[0].id : "", model: "" }); if (!def) def = models[0].id; drawModels(); drawAccess(); });
 
   const recDays = h("input", { type: "number", min: "0", value: String(cfg.recording_retention_days || 0) });
   recDays.style.width = "100px";
@@ -997,8 +1065,10 @@ async function renderSettings() {
   const save = h("button", { class: "primary" }, "Save settings");
   save.addEventListener("click", async () => {
     const body = {
-      ai_providers: providers.map((p) => { const o = { id: p.id || undefined, label: p.label, url: p.url, model: p.model }; if (p.key) o.key = p.key; return o; }),
+      ai_endpoints: endpoints.map((e) => { const o = { id: e.id, label: e.label, url: e.url }; if (e.key) o.key = e.key; return o; }),
+      ai_models: models.map((m) => ({ id: m.id, label: m.label, endpoint: m.endpoint, model: m.model })),
       ai_default: def,
+      ai_access: Object.entries(access).map(([username, set]) => ({ username, models: [...set] })).filter((a) => a.models.length),
       recording_retention_days: Number(recDays.value) || 0,
       audit_retention_days: Number(audDays.value) || 0,
     };
@@ -1006,11 +1076,17 @@ async function renderSettings() {
     catch (e) { toast(e.message, true); }
   });
 
-  $("view").replaceChildren(h("div", { class: "card", style: "max-width:780px" },
-    h("h3", {}, "AI models"),
-    h("p", { class: "muted" }, "Add one or more OpenAI-compatible models (Ollama / llama.cpp / vLLM). The Default model is used for session summaries. Nothing leaves your network; remove all models to disable AI."),
-    list, h("div", { style: "margin-top:10px" }, add),
-    h("h3", { style: "margin-top:20px" }, "Retention"),
+  $("view").replaceChildren(h("div", { class: "card", style: "max-width:820px" },
+    h("h3", {}, "AI endpoints (APIs)"),
+    h("p", { class: "muted" }, "Each endpoint is one OpenAI-compatible API (Ollama / llama.cpp / vLLM). One endpoint can serve many models — use “Fetch models” to add them. Nothing leaves your network."),
+    epList, h("div", { style: "margin-top:10px" }, addEp),
+    h("h3", { style: "margin-top:22px" }, "Models"),
+    h("p", { class: "muted" }, "Each model is a model name served by one endpoint. The Default model is used for session summaries and for users who don't pick one."),
+    modelList, h("div", { style: "margin-top:10px" }, addModel),
+    h("h3", { style: "margin-top:22px" }, "User access"),
+    h("p", { class: "muted" }, "Pick which models each user may use in the in-session assistant. Users with no models ticked get no AI. Administrators can always use every model."),
+    accessList,
+    h("h3", { style: "margin-top:22px" }, "Retention"),
     h("div", { class: "grant-add" },
       h("label", {}, "Recordings older than (days)", recDays),
       h("label", {}, "Audit entries older than (days)", audDays)),

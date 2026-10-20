@@ -19,7 +19,7 @@ use systemdeck_core::{
 use crate::{
     auth::{self, AdminUser, AuthUser},
     error::{ApiError, ApiResult},
-    store::{Db, StoredUser},
+    store::{endpoint_label, Db, StoredUser},
     AppState,
 };
 
@@ -306,15 +306,16 @@ struct AuditQuery {
 
 async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<ServerConfig>> {
     let c = st.db.config()?;
-    let providers = c.providers();
-    let default = c.default_provider().map(|p| p.id).unwrap_or_default();
+    let endpoints = c.endpoints();
+    let models = c.models();
+    let users: Vec<String> = st.db.users()?.into_iter().filter(|u| !u.is_admin).map(|u| u.username).collect();
     Ok(Json(ServerConfig {
-        ai_enabled: !providers.is_empty(),
-        ai_default: default,
-        ai_providers: providers
-            .into_iter()
-            .map(|p| AiProviderInfo { id: p.id, label: p.label, url: p.url, model: p.model, key_set: !p.key.is_empty() })
-            .collect(),
+        ai_enabled: !models.is_empty(),
+        ai_endpoints: endpoints.into_iter().map(|e| AiEndpointInfo { id: e.id, label: e.label, url: e.url, key_set: !e.key.is_empty() }).collect(),
+        ai_models: models.into_iter().map(|m| AiModelInfo { id: m.id, label: m.label, endpoint: m.endpoint, model: m.model }).collect(),
+        ai_default: c.default_model().map(|m| m.id).unwrap_or_default(),
+        ai_access: c.ai_access.iter().map(|a| AiUserAccess { username: a.username.clone(), models: a.models.clone() }).collect(),
+        users,
         recording_retention_days: c.recording_retention_days,
         audit_retention_days: c.audit_retention_days,
     }))
@@ -322,38 +323,68 @@ async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResul
 
 async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<ServerConfigUpdate>) -> ApiResult<Json<ServerConfig>> {
     let mut c = st.db.config()?;
-    if let Some(list) = req.ai_providers {
-        // Keys are write-only: a blank key keeps the existing one for that id.
-        let existing = c.providers();
+    // Endpoints first: keys are write-only (a blank key keeps the stored one).
+    if let Some(list) = req.ai_endpoints {
+        let existing = c.endpoints();
         let mut out = Vec::new();
-        for p in list {
-            let id = p.id.filter(|s| !s.is_empty()).unwrap_or_else(|| Uuid::new_v4().simple().to_string());
-            let key = match p.key {
+        for e in list {
+            let id = e.id.filter(|s| !s.is_empty()).unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+            let key = match e.key {
                 Some(k) if !k.is_empty() => k,
-                _ => existing.iter().find(|e| e.id == id).map(|e| e.key.clone()).unwrap_or_default(),
+                _ => existing.iter().find(|x| x.id == id).map(|x| x.key.clone()).unwrap_or_default(),
             };
-            let label = if p.label.trim().is_empty() { p.model.clone() } else { p.label.trim().to_string() };
-            out.push(crate::store::AiProvider {
-                id,
-                label,
-                url: p.url.trim().trim_end_matches('/').to_string(),
-                model: p.model.trim().to_string(),
-                key,
-            });
+            let url = e.url.trim().trim_end_matches('/').to_string();
+            let label = if e.label.trim().is_empty() { endpoint_label(&url) } else { e.label.trim().to_string() };
+            out.push(crate::store::AiEndpoint { id, label, url, key });
         }
-        // Drop entries with no URL, and migrate off the legacy single fields.
-        c.ai_providers = out.into_iter().filter(|p| !p.url.is_empty()).collect();
+        c.ai_endpoints = out.into_iter().filter(|e| !e.url.is_empty()).collect();
+        // Migrate off the legacy flat fields now that endpoints are explicit.
+        c.ai_providers = Vec::new();
         c.ai_url = String::new();
         c.ai_model = String::new();
         c.ai_key = String::new();
-        if !c.ai_providers.iter().any(|p| p.id == c.ai_default) {
-            c.ai_default = c.ai_providers.first().map(|p| p.id.clone()).unwrap_or_default();
+    }
+    if let Some(list) = req.ai_models {
+        let valid: std::collections::HashSet<String> = c.ai_endpoints.iter().map(|e| e.id.clone()).collect();
+        let mut out = Vec::new();
+        for m in list {
+            let id = m.id.filter(|s| !s.is_empty()).unwrap_or_else(|| Uuid::new_v4().simple().to_string());
+            let model = m.model.trim().to_string();
+            let label = if m.label.trim().is_empty() { model.clone() } else { m.label.trim().to_string() };
+            out.push(crate::store::AiModelCfg { id, label, endpoint: m.endpoint, model });
+        }
+        // Keep models with a real name on an existing endpoint.
+        c.ai_models = out.into_iter().filter(|m| !m.model.is_empty() && valid.contains(&m.endpoint)).collect();
+        c.ai_providers = Vec::new();
+        if !c.ai_models.iter().any(|m| m.id == c.ai_default) {
+            c.ai_default = c.ai_models.first().map(|m| m.id.clone()).unwrap_or_default();
         }
     }
     if let Some(d) = req.ai_default {
-        if c.ai_providers.iter().any(|p| p.id == d) {
+        if c.ai_models.iter().any(|m| m.id == d) {
             c.ai_default = d;
         }
+    }
+    if let Some(access) = req.ai_access {
+        let valid: std::collections::HashSet<String> = c.ai_models.iter().map(|m| m.id.clone()).collect();
+        c.ai_access = access
+            .into_iter()
+            .filter_map(|a| {
+                let username = a.username.trim().to_lowercase();
+                if username.is_empty() {
+                    return None;
+                }
+                let models: Vec<String> = a.models.into_iter().filter(|m| valid.contains(m)).collect();
+                (!models.is_empty()).then_some(crate::store::AiAccess { username, models })
+            })
+            .collect();
+    } else {
+        // Drop grants for models that no longer exist.
+        let valid: std::collections::HashSet<String> = c.ai_models.iter().map(|m| m.id.clone()).collect();
+        for a in &mut c.ai_access {
+            a.models.retain(|m| valid.contains(m));
+        }
+        c.ai_access.retain(|a| !a.models.is_empty());
     }
     if let Some(v) = req.recording_retention_days {
         c.recording_retention_days = v.max(0);
@@ -362,7 +393,7 @@ async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUse
         c.audit_retention_days = v.max(0);
     }
     st.db.put_config(&c)?;
-    st.db.audit(&admin.username, "config_update", "server settings", &format!("{} model(s)", c.providers().len()));
+    st.db.audit(&admin.username, "config_update", "server settings", &format!("{} endpoint(s), {} model(s)", c.ai_endpoints.len(), c.ai_models.len()));
     admin_get_config(State(st), AdminUser(admin)).await
 }
 
@@ -374,22 +405,30 @@ struct TestAi {
     model: Option<String>,
     #[serde(default)]
     key: Option<String>,
-    /// Test an already-saved model by id (used when the key is hidden).
+    /// Saved endpoint id: fills the URL/key when the body leaves them blank
+    /// (the key is write-only, so the UI can't resend it).
     #[serde(default)]
-    id: Option<String>,
+    endpoint: Option<String>,
 }
 
-/// Tests an AI model: the one in the body, or a saved one by id, or the default.
+impl TestAi {
+    /// Resolves (url, key): the body's, else the saved endpoint's.
+    fn endpoint(&self, cfg: &crate::store::Config) -> (String, String) {
+        let saved = self.endpoint.as_deref().and_then(|id| cfg.endpoint(id));
+        let url = self.url.clone().filter(|s| !s.trim().is_empty()).or_else(|| saved.as_ref().map(|e| e.url.clone())).unwrap_or_default();
+        let key = match &self.key {
+            Some(k) if !k.is_empty() => k.clone(),
+            _ => saved.as_ref().map(|e| e.key.clone()).unwrap_or_default(),
+        };
+        (url, key)
+    }
+}
+
+/// Tests one model on an endpoint (body url/key, or a saved endpoint by id).
 async fn admin_test_ai(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
-    let saved = st.db.config()?;
-    let base = req.id.as_deref().and_then(|id| saved.provider(id)).or_else(|| saved.default_provider()).unwrap_or_default();
-    let url = req.url.filter(|s| !s.trim().is_empty()).unwrap_or(base.url);
-    let model = req.model.filter(|s| !s.trim().is_empty()).unwrap_or(base.model);
-    let key = match req.key {
-        Some(k) if !k.is_empty() => k,
-        _ => base.key,
-    };
-    let ai = crate::ai::Ai::new(Some(url), Some(model), Some(key)).ok_or_else(|| ApiError::bad_request("no endpoint URL to test"))?;
+    let (url, key) = req.endpoint(&st.db.config()?);
+    let model = req.model.clone().filter(|s| !s.trim().is_empty());
+    let ai = crate::ai::Ai::new(Some(url), model, Some(key)).ok_or_else(|| ApiError::bad_request("no endpoint URL to test"))?;
     match ai.ping().await {
         Ok(reply) => Ok(Json(json!({ "ok": true, "reply": reply.chars().take(120).collect::<String>() }))),
         Err(e) => Ok(Json(json!({ "ok": false, "error": format!("{e:#}") }))),
@@ -400,13 +439,7 @@ async fn admin_test_ai(State(st): State<AppState>, _a: AdminUser, Json(req): Jso
 /// URL without retyping it. Uses the body url/key, or a saved model by id, or
 /// the default model's endpoint.
 async fn admin_list_ai_models(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
-    let saved = st.db.config()?;
-    let base = req.id.as_deref().and_then(|id| saved.provider(id)).or_else(|| saved.default_provider()).unwrap_or_default();
-    let url = req.url.filter(|s| !s.trim().is_empty()).unwrap_or(base.url);
-    let key = match req.key {
-        Some(k) if !k.is_empty() => k,
-        _ => base.key,
-    };
+    let (url, key) = req.endpoint(&st.db.config()?);
     let ai = crate::ai::Ai::new(Some(url), None, Some(key)).ok_or_else(|| ApiError::bad_request("no endpoint URL"))?;
     match ai.list_models().await {
         Ok(models) => Ok(Json(json!({ "ok": true, "models": models }))),
@@ -662,14 +695,20 @@ async fn admin_summarize_recording(State(st): State<AppState>, AdminUser(admin):
 
 // ---- in-session AI assistant ----
 
-/// Models a signed-in client may use for the assistant (no keys/URLs).
-async fn ai_models(State(st): State<AppState>, _auth: AuthUser) -> ApiResult<Json<AiModelsInfo>> {
+/// Models this user is allowed to use for the assistant (no keys/URLs).
+async fn ai_models(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<AiModelsInfo>> {
     let c = st.db.config()?;
-    let providers = c.providers();
+    let allowed = c.allowed_models(&auth.user.username, auth.user.is_admin);
+    let default = allowed
+        .iter()
+        .find(|m| m.id == c.ai_default)
+        .map(|m| m.id.clone())
+        .or_else(|| allowed.first().map(|m| m.id.clone()))
+        .unwrap_or_default();
     Ok(Json(AiModelsInfo {
-        enabled: !providers.is_empty(),
-        default: c.default_provider().map(|p| p.id).unwrap_or_default(),
-        models: providers.into_iter().map(|p| AiModel { id: p.id, label: p.label }).collect(),
+        enabled: !allowed.is_empty(),
+        default,
+        models: allowed.into_iter().map(|m| AiModel { id: m.id, label: m.label }).collect(),
     }))
 }
 
@@ -681,8 +720,18 @@ async fn ai_chat(State(st): State<AppState>, auth: AuthUser, Json(req): Json<AiC
     if question.is_empty() {
         return Err(ApiError::bad_request("ask a question"));
     }
-    let ai = st
-        .ai(req.model.as_deref())
+    // Resolve the model the user asked for (or their default), enforcing the
+    // per-user grant. Admins may use every model.
+    let c = st.db.config()?;
+    let allowed = c.allowed_models(&auth.user.username, auth.user.is_admin);
+    if allowed.is_empty() {
+        return Err(ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "No AI models are available to you — ask an administrator for access"));
+    }
+    let chosen = match req.model.as_deref() {
+        Some(id) => allowed.iter().find(|m| m.id == id).cloned().ok_or_else(|| ApiError::forbidden("you are not allowed to use that model"))?,
+        None => allowed.iter().find(|m| m.id == c.ai_default).cloned().unwrap_or_else(|| allowed[0].clone()),
+    };
+    let ai = crate::ai::Ai::new(Some(chosen.url), Some(chosen.model), Some(chosen.key))
         .ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured (add a model in Settings)"))?;
     let protocol = if req.protocol.trim().is_empty() { "session".to_string() } else { req.protocol.trim().to_string() };
     let where_to = if req.host.trim().is_empty() { String::new() } else { format!(" to {}", req.host.trim()) };

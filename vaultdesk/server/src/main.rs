@@ -122,7 +122,7 @@ async fn main() -> Result<()> {
     // The dashboard-editable config in the DB is the source of truth; seed it
     // once from CLI/env for an existing deployment, then it is managed from the UI.
     seed_config_from_args(&db, &args)?;
-    if db.config()?.providers().is_empty() {
+    if db.config()?.models().is_empty() {
         tracing::info!("AI features disabled (add a model in the dashboard Settings)");
     } else {
         tracing::info!("AI features enabled");
@@ -157,15 +157,15 @@ async fn main() -> Result<()> {
 }
 
 impl AppState {
-    /// Builds an AI client for a chosen model id, or the default model.
-    /// None when nothing is configured.
+    /// Builds an AI client for a chosen model id, or the default model
+    /// (admin use; no per-user access check). None when nothing is configured.
     pub fn ai(&self, id: Option<&str>) -> Option<crate::ai::Ai> {
         let c = self.db.config().ok()?;
-        let p = match id {
-            Some(id) => c.provider(id),
-            None => c.default_provider(),
+        let m = match id {
+            Some(id) => c.model(id),
+            None => c.default_model(),
         }?;
-        crate::ai::Ai::new(Some(p.url), Some(p.model), Some(p.key))
+        crate::ai::Ai::new(Some(m.url), Some(m.model), Some(m.key))
     }
 }
 
