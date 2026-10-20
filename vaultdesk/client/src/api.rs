@@ -167,6 +167,32 @@ impl Api {
         self.post(&format!("/api/recordings/{id}/finish"), &())
     }
 
+    // ---- in-session AI assistant ----
+
+    pub fn ai_models(&self) -> ApiResult<AiModelsInfo> {
+        self.get("/api/ai/models")
+    }
+
+    pub fn ai_chat(&self, req: &AiChatRequest) -> ApiResult<AiChatResponse> {
+        // The server waits on a local model, which can take well over the
+        // default 20 s request timeout, so allow much longer for this call.
+        let mut r = self.http.post(format!("{}/api/ai/chat", self.base)).json(req).timeout(Duration::from_secs(180));
+        if let Some(token) = &self.token {
+            r = r.bearer_auth(token);
+        }
+        let resp = r.send().map_err(|e| ApiError::Network(e.to_string()))?;
+        let status = resp.status();
+        if status.is_success() {
+            return resp.json::<AiChatResponse>().map_err(|e| ApiError::Server(status.as_u16(), format!("unexpected response: {e}")));
+        }
+        let message = resp.json::<ErrorBody>().map(|b| b.error).unwrap_or_else(|_| status.to_string());
+        Err(match status {
+            StatusCode::UNAUTHORIZED => ApiError::Unauthorized(message),
+            StatusCode::FORBIDDEN => ApiError::Forbidden(message),
+            _ => ApiError::Server(status.as_u16(), message),
+        })
+    }
+
     // ---- administration ----
 
     pub fn admin_users(&self) -> ApiResult<Vec<UserInfo>> {

@@ -195,6 +195,54 @@ pub struct ServerConfigUpdate {
     pub audit_retention_days: Option<i64>,
 }
 
+/// One AI model offered to the client (no key or URL exposed).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AiModel {
+    pub id: String,
+    pub label: String,
+}
+
+/// AI availability for signed-in clients (drives the assistant's model picker).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AiModelsInfo {
+    pub enabled: bool,
+    pub default: String,
+    pub models: Vec<AiModel>,
+}
+
+/// One earlier turn of an assistant conversation.
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct AiChatTurn {
+    /// "user" or "assistant".
+    pub role: String,
+    pub content: String,
+}
+
+/// In-session assistant request: the live session's context plus a question.
+#[derive(Serialize, Deserialize, Default)]
+pub struct AiChatRequest {
+    /// Model id to use; None = the configured default model.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// "SSH", "RDP", "VNC", "WEB" or "SFTP".
+    #[serde(default)]
+    pub protocol: String,
+    #[serde(default)]
+    pub host: String,
+    /// Recent session text (terminal buffer, current URL, ...). Server truncates.
+    #[serde(default)]
+    pub context: String,
+    /// Earlier turns of this conversation, oldest first.
+    #[serde(default)]
+    pub history: Vec<AiChatTurn>,
+    pub question: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct AiChatResponse {
+    pub reply: String,
+}
+
 /// One recorded action in the server audit log.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AuditEvent {

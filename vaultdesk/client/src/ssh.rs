@@ -490,6 +490,20 @@ impl SessionView for TermSession {
     fn note(&self) -> Option<String> {
         self.shared.note.lock().unwrap().clone()
     }
+    fn ai_context(&self) -> String {
+        // The visible terminal screen, as plain text, for the assistant.
+        self.shared.parser.lock().unwrap().screen().contents()
+    }
+    fn insert_text(&mut self, text: &str) -> bool {
+        if !self.status().is_live() {
+            return false;
+        }
+        // Type the suggestion at the prompt without sending a newline, so the
+        // operator can review it and press Enter themselves.
+        let clean: String = text.replace(['\r', '\n'], " ");
+        self.send(clean.into_bytes());
+        true
+    }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         match &self.rec_status {

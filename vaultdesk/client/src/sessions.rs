@@ -61,6 +61,16 @@ pub trait SessionView {
     /// window). egui-rendered sessions ignore this.
     #[cfg(windows)]
     fn reparent(&mut self, _hwnd: isize) {}
+    /// Recent text context for the in-session AI assistant (terminal buffer,
+    /// current URL, ...). Empty when there is none to share.
+    fn ai_context(&self) -> String {
+        String::new()
+    }
+    /// Inserts assistant-suggested text into the session input without running
+    /// it (no Enter). Returns false when the session can't accept typed input.
+    fn insert_text(&mut self, _text: &str) -> bool {
+        false
+    }
     fn close(&mut self);
 }
 
@@ -894,6 +904,14 @@ impl SessionView for Session {
     fn ui(&mut self, ui: &mut egui::Ui) {
         Session::ui(self, ui)
     }
+    fn insert_text(&mut self, text: &str) -> bool {
+        if !self.status().is_live() {
+            return false;
+        }
+        // Types into whatever field has focus on the remote screen (no Enter).
+        self.type_text(text);
+        true
+    }
     fn close(&mut self) {
         Session::close(self)
     }
@@ -1234,6 +1252,14 @@ impl SessionView for BrowserSession {
         ui.allocate_rect(rect, Sense::hover());
         self.set_visible(true);
         self.place(rect, ui.ctx().pixels_per_point());
+    }
+    fn ai_context(&self) -> String {
+        format!("Current page URL: {}", self.url)
+    }
+    fn insert_text(&mut self, text: &str) -> bool {
+        // Types into whatever field the user last clicked on the page.
+        let _ = self.webview.evaluate_script(&Self::type_script(text));
+        true
     }
     fn close(&mut self) {
         if let Some(rec) = &self.rec {

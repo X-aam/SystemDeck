@@ -953,11 +953,35 @@ async function renderSettings() {
       });
       const rm = h("button", { class: "small danger" }, "Remove");
       rm.addEventListener("click", () => { providers.splice(i, 1); drawModels(); });
+      // One endpoint often serves many models: list them and add with one click.
+      const chips = h("div", { class: "model-chips" });
+      const fetchBtn = h("button", { class: "small" }, "Fetch models");
+      fetchBtn.addEventListener("click", async () => {
+        chips.replaceChildren(h("span", { class: "muted" }, "Loading…"));
+        try {
+          const r = await api("POST", "/api/admin/config/list-models", { url: p.url, key: p.key, id: p.id });
+          if (!r.ok) { chips.replaceChildren(h("span", { class: "error" }, "Failed: " + r.error)); return; }
+          if (!r.models || !r.models.length) { chips.replaceChildren(h("span", { class: "muted" }, "This endpoint reported no models")); return; }
+          chips.replaceChildren(
+            h("span", { class: "muted" }, "Click to use (reuses this URL & key):"),
+            ...r.models.map((m) => {
+              const chip = h("button", { class: "small chip" }, m);
+              chip.addEventListener("click", () => {
+                if (!p.model) { p.model = m; if (!p.label) p.label = m; }
+                else { providers.push({ id: "", label: m, url: p.url, model: m, key_set: p.key_set, key: p.key }); }
+                drawModels();
+              });
+              return chip;
+            })
+          );
+        } catch (e) { chips.replaceChildren(h("span", { class: "error" }, "Failed: " + e.message)); }
+      });
       return h("div", { class: "model-row" },
         h("div", { class: "model-grid" },
           h("label", {}, "Name", label), h("label", {}, "Model", model),
           h("label", {}, "Endpoint URL (ends in /v1)", url), h("label", {}, "API key (optional)", key)),
-        h("div", { class: "model-actions" }, h("label", { class: "check" }, defRadio, "Default"), test, out, h("span", { class: "grow" }), rm));
+        h("div", { class: "model-actions" }, h("label", { class: "check" }, defRadio, "Default"), fetchBtn, test, out, h("span", { class: "grow" }), rm),
+        chips);
     }));
   };
   drawModels();

@@ -8,7 +8,7 @@ use eframe::egui::{self, Color32, FontId, Frame, Margin, RichText, Sense, Stroke
 use uuid::Uuid;
 use systemdeck_core::EntryKind;
 
-use super::{editor_ui, Action, App, Conn, ALL_VAULTS, VAULT_HEADER};
+use super::{editor_ui, Action, App, ChatMsg, ChatRole, Conn, ALL_VAULTS, VAULT_HEADER};
 use crate::{
     sessions::Status,
     store::{CachedVault, LocalEntry, LOCAL_VAULT},
@@ -493,6 +493,7 @@ impl App {
             let size = ui.available_size() * ppp;
             self.session_px = (size.x as u16, size.y as u16);
 
+            let assistant_open = self.assistant_open;
             match self.active_tab.and_then(|id| self.sessions.iter_mut().find(|s| s.id() == id)) {
                 Some(session) => {
                     let status = session.status();
@@ -520,6 +521,13 @@ impl App {
                                 let label = if focus_mode { "Exit full screen" } else { "Full screen" };
                                 if ui.button(label).on_hover_text("Hide the lists and fill the screen with this session").clicked() {
                                     actions.push(Action::ToggleFullScreen);
+                                }
+                                if ui
+                                    .selectable_label(assistant_open, "Assistant")
+                                    .on_hover_text("Ask the AI assistant about this session (suggests commands you can insert)")
+                                    .clicked()
+                                {
+                                    actions.push(Action::ToggleAssistant);
                                 }
                                 if !focus_mode {
                                     if ui.button("⧉ Detach").on_hover_text("Pop this session out into its own window").clicked() {
@@ -600,6 +608,110 @@ impl App {
                 actions.push(Action::ToggleDetach(id));
             }
         }
+    }
+
+    // ------------------------------------------------------------------
+    // In-session AI assistant (right side panel)
+    // ------------------------------------------------------------------
+
+    pub(super) fn assistant_panel(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        if !self.assistant_open {
+            return;
+        }
+        let Some(sid) = self.active_tab else { return };
+        // Read what we need from the active session, then drop the borrow so the
+        // panel closures can mutate assistant state freely.
+        let (badge, title) = {
+            let Some(session) = self.sessions.iter().find(|s| s.id() == sid) else { return };
+            (session.badge().to_string(), session.title())
+        };
+        let messages = self.assistant_chats.get(&sid).cloned().unwrap_or_default();
+        let models = self.ai_models.clone();
+        let pending = self.assistant_pending.as_ref().map(|(p, _)| *p == sid).unwrap_or(false);
+        let signed_in = self.signed_in();
+        let model_label = self
+            .assistant_model
+            .as_ref()
+            .and_then(|id| models.iter().find(|m| &m.id == id))
+            .map(|m| m.label.clone())
+            .unwrap_or_else(|| "Default model".to_string());
+
+        egui::SidePanel::right("assistant")
+            .default_width(360.0)
+            .width_range(300.0..=560.0)
+            .resizable(true)
+            .frame(Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0_f32, theme::border())))
+            .show(ctx, |ui| {
+                // Header: title, target session, model picker.
+                egui::TopBottomPanel::top("assist_head")
+                    .frame(Frame::new().fill(theme::panel()).inner_margin(Margin::symmetric(12, 10)))
+                    .show_inside(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Session assistant").color(theme::text()).strong().size(14.0));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button("Close").clicked() {
+                                    actions.push(Action::ToggleAssistant);
+                                }
+                            });
+                        });
+                        ui.label(RichText::new(format!("{badge}  {title}")).color(theme::text_weak()).size(11.5));
+                        if !models.is_empty() {
+                            ui.add_space(5.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("Model").color(theme::text_weak()).size(11.5));
+                                egui::ComboBox::from_id_salt("assist_model").selected_text(model_label).show_ui(ui, |ui| {
+                                    ui.selectable_value(&mut self.assistant_model, None, "Default model");
+                                    for m in &models {
+                                        ui.selectable_value(&mut self.assistant_model, Some(m.id.clone()), &m.label);
+                                    }
+                                });
+                            });
+                        }
+                    });
+                // Input row, pinned to the bottom.
+                egui::TopBottomPanel::bottom("assist_input")
+                    .frame(Frame::new().fill(theme::panel()).inner_margin(Margin::symmetric(10, 10)))
+                    .show_inside(ui, |ui| {
+                        let hint = if !signed_in { "Sign in to use the assistant" } else if pending { "Waiting for a reply…" } else { "Ask about this session…" };
+                        ui.horizontal(|ui| {
+                            let can_type = signed_in && !pending;
+                            let w = (ui.available_width() - 58.0).max(80.0);
+                            let resp = ui.add_enabled(can_type, egui::TextEdit::singleline(&mut self.assistant_input).hint_text(hint).desired_width(w));
+                            let enter = resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let can_send = can_type && !self.assistant_input.trim().is_empty();
+                            if ui.add_enabled(can_send, egui::Button::new("Send")).clicked() || (enter && can_send) {
+                                actions.push(Action::AssistantSend);
+                            }
+                        });
+                        if pending {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.add(egui::Spinner::new().size(14.0));
+                                ui.label(RichText::new("Assistant is thinking…").color(theme::text_weak()).size(11.5));
+                            });
+                        }
+                    });
+                // Conversation.
+                egui::CentralPanel::default().frame(Frame::new().fill(theme::panel())).show_inside(ui, |ui| {
+                    egui::ScrollArea::vertical().auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
+                        Frame::new().inner_margin(Margin::symmetric(12, 10)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            if messages.is_empty() {
+                                let hint = if signed_in {
+                                    "Ask for the command to do something, to explain an error on the screen, or what a setting means. Suggested commands show an Insert button — nothing runs until you press Enter in the session."
+                                } else {
+                                    "Sign in to the server (avatar menu) to use the assistant. It uses the AI model configured on the server, so nothing leaves your network."
+                                };
+                                ui.label(RichText::new(hint).color(theme::text_weak()).size(12.0));
+                            }
+                            for m in &messages {
+                                assistant_bubble(ui, sid, m, actions);
+                                ui.add_space(8.0);
+                            }
+                        });
+                    });
+                });
+            });
     }
 
     fn content_header(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
@@ -1118,6 +1230,76 @@ fn tab_pill(ui: &mut egui::Ui, dot: Option<Color32>, text: &str, active: bool, c
         close = resp.clicked() && hovered;
     }
     (resp, close)
+}
+
+/// One message in the assistant conversation, splitting fenced code blocks out
+/// so each can be inserted into the session.
+fn assistant_bubble(ui: &mut egui::Ui, sid: Uuid, m: &ChatMsg, actions: &mut Vec<Action>) {
+    let (who, who_color, fill) = match m.role {
+        ChatRole::User => ("You", theme::text(), theme::subtle()),
+        ChatRole::Assistant => ("Assistant", theme::ACCENT_DARK, theme::app_bg()),
+        ChatRole::Error => ("Error", theme::DANGER, theme::danger_bg()),
+    };
+    Frame::new()
+        .fill(fill)
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .corner_radius(8)
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(who).color(who_color).strong().size(11.0));
+            ui.add_space(3.0);
+            for (is_code, text) in message_segments(&m.text) {
+                if is_code {
+                    code_block(ui, sid, &text, actions);
+                    ui.add_space(4.0);
+                } else {
+                    ui.add(egui::Label::new(RichText::new(text).color(theme::text()).size(13.0)).wrap());
+                }
+            }
+        });
+}
+
+/// A suggested-command block with Insert (type it into the session) and Copy.
+fn code_block(ui: &mut egui::Ui, sid: Uuid, code: &str, actions: &mut Vec<Action>) {
+    Frame::new()
+        .fill(theme::subtle())
+        .stroke(Stroke::new(1.0_f32, theme::border()))
+        .corner_radius(6)
+        .inner_margin(Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.add(egui::Label::new(RichText::new(code).monospace().size(12.5).color(theme::text())).wrap());
+            ui.add_space(5.0);
+            ui.horizontal(|ui| {
+                if ui.small_button("Insert").on_hover_text("Type this into the session — nothing runs until you press Enter there").clicked() {
+                    actions.push(Action::InsertToSession(sid, code.to_string()));
+                }
+                if ui.small_button("Copy").clicked() {
+                    ui.ctx().copy_text(code.to_string());
+                }
+            });
+        });
+}
+
+/// Splits text into (is_code, segment) runs on triple-backtick fences.
+fn message_segments(text: &str) -> Vec<(bool, String)> {
+    let mut segs = Vec::new();
+    let mut in_code = false;
+    let mut buf = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            segs.push((in_code, std::mem::take(&mut buf)));
+            in_code = !in_code;
+            continue;
+        }
+        if !buf.is_empty() {
+            buf.push('\n');
+        }
+        buf.push_str(line);
+    }
+    segs.push((in_code, buf));
+    segs.into_iter().map(|(c, s)| (c, s.trim_matches('\n').to_string())).filter(|(_, s)| !s.trim().is_empty()).collect()
 }
 
 fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {

@@ -12,6 +12,7 @@ use eframe::egui::{self, Color32, RichText};
 use rand::{seq::SliceRandom, Rng};
 use uuid::Uuid;
 use systemdeck_core::{ColorDepth, DisplayMode, DisplaySettings, Entry, EntryKind, Quality, Resolution, Scaling};
+use systemdeck_core::api::{AiChatRequest, AiChatTurn, AiModel};
 
 use crate::{
     admin::AdminPanel,
@@ -90,6 +91,26 @@ enum Action {
     ToggleNav,
     /// Pop a session out into its own window (or re-attach it).
     ToggleDetach(Uuid),
+    /// Show/hide the in-session AI assistant panel.
+    ToggleAssistant,
+    /// Send the typed question to the assistant for the active session.
+    AssistantSend,
+    /// Insert an assistant-suggested command into a session (no Enter).
+    InsertToSession(Uuid, String),
+}
+
+/// One line in an assistant conversation.
+#[derive(Clone)]
+struct ChatMsg {
+    role: ChatRole,
+    text: String,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChatRole {
+    User,
+    Assistant,
+    Error,
 }
 
 /// Entry being created or edited, with text fields for the non-string parts.
@@ -202,6 +223,19 @@ pub struct App {
     detached: HashSet<Uuid>,
     /// Session tab currently being dragged to reorder.
     tab_drag: Option<Uuid>,
+
+    /// In-session AI assistant: panel open, draft question, chosen model.
+    assistant_open: bool,
+    assistant_input: String,
+    assistant_model: Option<String>,
+    /// Conversation per session id, so switching tabs keeps each chat.
+    assistant_chats: HashMap<Uuid, Vec<ChatMsg>>,
+    /// In-flight reply: (session id, receiver of the reply or an error).
+    assistant_pending: Option<(Uuid, mpsc::Receiver<Result<String, String>>)>,
+    /// Models offered by the server (fetched once when the panel first opens).
+    ai_models: Vec<AiModel>,
+    ai_models_rx: Option<mpsc::Receiver<Vec<AiModel>>>,
+    ai_loaded: bool,
 }
 
 impl App {
@@ -248,6 +282,14 @@ impl App {
             nav_collapsed: false,
             detached: HashSet::new(),
             tab_drag: None,
+            assistant_open: false,
+            assistant_input: String::new(),
+            assistant_model: None,
+            assistant_chats: HashMap::new(),
+            assistant_pending: None,
+            ai_models: Vec::new(),
+            ai_models_rx: None,
+            ai_loaded: false,
         };
         app.reload();
         app
@@ -405,6 +447,98 @@ impl App {
         self.api = Api::new(&self.settings.server_url, self.settings.token.clone());
     }
 
+    // ---- in-session AI assistant ----
+
+    /// Fetches the configured models in the background (for the model picker).
+    fn load_ai_models(&mut self, ctx: &egui::Context) {
+        self.ai_loaded = true;
+        if !self.signed_in() {
+            return;
+        }
+        let api = self.api.clone();
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            if let Ok(info) = api.ai_models() {
+                let _ = tx.send(info.models);
+                ctx.request_repaint();
+            }
+        });
+        self.ai_models_rx = Some(rx);
+    }
+
+    fn poll_ai_models(&mut self) {
+        if let Some(rx) = &self.ai_models_rx {
+            match rx.try_recv() {
+                Ok(models) => {
+                    self.ai_models = models;
+                    self.ai_models_rx = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.ai_models_rx = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+    }
+
+    /// Sends the typed question to the assistant for the active session,
+    /// gathering that session's context on the way out.
+    fn assistant_send(&mut self, ctx: &egui::Context) {
+        let Some(sid) = self.active_tab else { return };
+        let question = self.assistant_input.trim().to_string();
+        if question.is_empty() || self.assistant_pending.is_some() {
+            return;
+        }
+        let Some(session) = self.sessions.iter().find(|s| s.id() == sid) else { return };
+        let protocol = session.badge().to_string();
+        let context = session.ai_context();
+        let entry_id = session.entry_id();
+        let host = self
+            .entries
+            .iter()
+            .find(|e| e.entry.id == entry_id)
+            .map(|e| if e.entry.host.is_empty() { e.entry.name.clone() } else { e.entry.host.clone() })
+            .unwrap_or_default();
+        let chat = self.assistant_chats.entry(sid).or_default();
+        let history: Vec<AiChatTurn> = chat
+            .iter()
+            .filter_map(|m| match m.role {
+                ChatRole::User => Some(AiChatTurn { role: "user".into(), content: m.text.clone() }),
+                ChatRole::Assistant => Some(AiChatTurn { role: "assistant".into(), content: m.text.clone() }),
+                ChatRole::Error => None,
+            })
+            .collect();
+        chat.push(ChatMsg { role: ChatRole::User, text: question.clone() });
+        self.assistant_input.clear();
+
+        let req = AiChatRequest { model: self.assistant_model.clone(), protocol, host, context, history, question };
+        let api = self.api.clone();
+        let ctx = ctx.clone();
+        let (tx, rx) = mpsc::channel();
+        thread::spawn(move || {
+            let result = api.ai_chat(&req).map(|r| r.reply).map_err(|e| e.to_string());
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.assistant_pending = Some((sid, rx));
+    }
+
+    fn poll_assistant(&mut self) {
+        let Some((sid, rx)) = &self.assistant_pending else { return };
+        let sid = *sid;
+        match rx.try_recv() {
+            Ok(result) => {
+                self.assistant_pending = None;
+                let chat = self.assistant_chats.entry(sid).or_default();
+                match result {
+                    Ok(reply) => chat.push(ChatMsg { role: ChatRole::Assistant, text: reply }),
+                    Err(e) => chat.push(ChatMsg { role: ChatRole::Error, text: e }),
+                }
+            }
+            Err(mpsc::TryRecvError::Disconnected) => self.assistant_pending = None,
+            Err(mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
     // ---- actions ----
 
     fn handle(&mut self, ctx: &egui::Context, action: Action) {
@@ -509,6 +643,22 @@ impl App {
                     }
                 } else if self.sessions.iter().any(|s| s.id() == sid) {
                     self.active_tab = Some(sid);
+                }
+            }
+            Action::ToggleAssistant => {
+                self.assistant_open = !self.assistant_open;
+                if self.assistant_open && !self.ai_loaded {
+                    self.load_ai_models(ctx);
+                }
+            }
+            Action::AssistantSend => self.assistant_send(ctx),
+            Action::InsertToSession(sid, text) => {
+                if let Some(s) = self.sessions.iter_mut().find(|s| s.id() == sid) {
+                    if s.insert_text(&text) {
+                        self.set_status("Inserted into the session — review it, then press Enter to run");
+                    } else {
+                        self.set_error("This session can't accept inserted text right now");
+                    }
                 }
             }
             Action::ToggleFullScreen => {
@@ -1336,6 +1486,8 @@ impl eframe::App for App {
         }
         let _ = &frame;
         self.poll_sync();
+        self.poll_ai_models();
+        self.poll_assistant();
         let due = self.last_sync_attempt.is_none_or(|t| t.elapsed() >= AUTO_SYNC_EVERY);
         if self.signed_in() && self.sync_rx.is_none() && due {
             self.start_sync(ctx);
@@ -1354,6 +1506,7 @@ impl eframe::App for App {
             }
             self.status_line(ctx);
         }
+        self.assistant_panel(ctx, &mut actions);
         self.content_panel(ctx, &mut actions);
         self.detached_windows(ctx, &mut actions);
         self.login_window(ctx);
