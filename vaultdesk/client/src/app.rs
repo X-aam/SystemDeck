@@ -84,6 +84,12 @@ enum Action {
     PickAll(Vec<Uuid>),
     /// Push the picked entries to a vault (copy, or move = delete the originals).
     BulkPush { target: Uuid, remove_source: bool },
+    /// Open another session of this entry even if one is already open.
+    OpenAnother(Uuid),
+    /// Show/hide the connection list panel.
+    ToggleNav,
+    /// Pop a session out into its own window (or re-attach it).
+    ToggleDetach(Uuid),
 }
 
 /// Entry being created or edited, with text fields for the non-string parts.
@@ -190,6 +196,12 @@ pub struct App {
     push_move: bool,
     /// SystemDeck window handle, captured each frame, for embedded browsers.
     window_handle: Option<isize>,
+    /// Connection list hidden to give sessions more room.
+    nav_collapsed: bool,
+    /// Sessions popped out into their own window.
+    detached: HashSet<Uuid>,
+    /// Session tab currently being dragged to reorder.
+    tab_drag: Option<Uuid>,
 }
 
 impl App {
@@ -233,6 +245,9 @@ impl App {
             push_target: None,
             push_move: false,
             window_handle: None,
+            nav_collapsed: false,
+            detached: HashSet::new(),
+            tab_drag: None,
         };
         app.reload();
         app
@@ -483,6 +498,19 @@ impl App {
                 self.picked = ids.into_iter().collect();
             }
             Action::BulkPush { target, remove_source } => self.bulk_push(ctx, target, remove_source),
+            Action::OpenAnother(id) => self.open_entry_new(ctx, id),
+            Action::ToggleNav => self.nav_collapsed = !self.nav_collapsed,
+            Action::ToggleDetach(sid) => {
+                if !self.detached.remove(&sid) {
+                    self.detached.insert(sid);
+                    // A detached session is shown in its own window, not the main tabs.
+                    if self.active_tab == Some(sid) {
+                        self.active_tab = self.sessions.iter().find(|s| !self.detached.contains(&s.id())).map(|s| s.id());
+                    }
+                } else if self.sessions.iter().any(|s| s.id() == sid) {
+                    self.active_tab = Some(sid);
+                }
+            }
             Action::ToggleFullScreen => {
                 self.focus_mode = !self.focus_mode;
                 ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(self.focus_mode));
@@ -597,6 +625,15 @@ impl App {
     /// Opens a connection. `embedded`: force tab (true) / external program
     /// (false); `None` follows the entry's display mode and the global setting.
     fn open_entry(&mut self, ctx: &egui::Context, id: Uuid, embedded: Option<bool>) {
+        self.open_entry_ex(ctx, id, embedded, false);
+    }
+
+    /// Opens a new session of `id` even if one is already open.
+    fn open_entry_new(&mut self, ctx: &egui::Context, id: Uuid) {
+        self.open_entry_ex(ctx, id, Some(true), true);
+    }
+
+    fn open_entry_ex(&mut self, ctx: &egui::Context, id: Uuid, embedded: Option<bool>, force_new: bool) {
         let Some(le) = self.entry(id) else { return };
         let entry = le.entry.clone();
         let recorded = entry.kind.can_embed() && (entry.record_session || self.vault_requires_recording(entry.vault_id));
@@ -611,7 +648,7 @@ impl App {
                 DisplayMode::Default => !self.settings.external_by_default,
             });
             if in_tab {
-                return self.open_browser(ctx, id);
+                return self.open_browser(ctx, id, force_new);
             }
             match launch::launch(&entry) {
                 Ok(msg) => self.set_status(msg),
@@ -630,9 +667,11 @@ impl App {
                 }));
 
         if embedded {
-            if let Some(existing) = self.sessions.iter().find(|s| s.entry_id() == id && s.status().is_live() && !s.is_files()) {
-                self.active_tab = Some(existing.id());
-                return;
+            if !force_new {
+                if let Some(existing) = self.sessions.iter().find(|s| s.entry_id() == id && s.status().is_live() && !s.is_files()) {
+                    self.active_tab = Some(existing.id());
+                    return;
+                }
             }
             let plan = match self.recording_plan(&entry) {
                 Ok(plan) => plan,
@@ -667,10 +706,12 @@ impl App {
     }
 
     /// Opens a Website entry in an embedded WebView2 tab.
-    fn open_browser(&mut self, ctx: &egui::Context, id: Uuid) {
-        if let Some(existing) = self.sessions.iter().find(|s| s.entry_id() == id && !s.is_files()) {
-            self.active_tab = Some(existing.id());
-            return;
+    fn open_browser(&mut self, ctx: &egui::Context, id: Uuid, force_new: bool) {
+        if !force_new {
+            if let Some(existing) = self.sessions.iter().find(|s| s.entry_id() == id && !s.is_files()) {
+                self.active_tab = Some(existing.id());
+                return;
+            }
         }
         let Some(le) = self.entry(id) else { return };
         let entry = le.entry.clone();
@@ -1308,10 +1349,13 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Fullscreen(false));
         }
         if !self.focus_mode {
-            self.list_panel(ctx, &mut actions);
+            if !self.nav_collapsed {
+                self.list_panel(ctx, &mut actions);
+            }
             self.status_line(ctx);
         }
         self.content_panel(ctx, &mut actions);
+        self.detached_windows(ctx, &mut actions);
         self.login_window(ctx);
         self.password_window(ctx);
         self.import_window(ctx);

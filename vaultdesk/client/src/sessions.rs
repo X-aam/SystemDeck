@@ -57,6 +57,10 @@ pub trait SessionView {
     /// Shown/hidden each frame (only the active tab is visible). Native overlay
     /// sessions (the embedded browser) use this to hide their child window.
     fn set_visible(&mut self, _visible: bool) {}
+    /// Re-parent a native child window to `hwnd` (for detaching into another
+    /// window). egui-rendered sessions ignore this.
+    #[cfg(windows)]
+    fn reparent(&mut self, _hwnd: isize) {}
     fn close(&mut self);
 }
 
@@ -68,6 +72,18 @@ pub fn window_hwnd(frame: &eframe::Frame) -> Option<isize> {
         RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
         _ => None,
     }
+}
+
+/// Finds a top-level window by exact title (for detached viewport windows,
+/// whose native handle egui doesn't expose directly).
+#[cfg(windows)]
+pub fn find_window_by_title(title: &str) -> Option<isize> {
+    use windows::core::HSTRING;
+    use windows::Win32::UI::WindowsAndMessaging::FindWindowW;
+    let wide = HSTRING::from(title);
+    let hwnd = unsafe { FindWindowW(windows::core::PCWSTR::null(), &wide).ok()? };
+    let raw = hwnd.0 as isize;
+    (raw != 0).then_some(raw)
 }
 
 #[derive(Clone, PartialEq)]
@@ -1017,6 +1033,8 @@ pub struct BrowserSession {
     password: String,
     webview: wry::WebView,
     visible: bool,
+    /// Current parent window HWND (main window, or a detached one).
+    parent: isize,
     rec: Option<BrowserRec>,
 }
 
@@ -1088,6 +1106,7 @@ impl BrowserSession {
             password: entry.password.clone(),
             webview,
             visible: true,
+            parent: parent_hwnd,
             rec,
         })
     }
@@ -1200,6 +1219,14 @@ impl SessionView for BrowserSession {
         if visible != self.visible {
             let _ = self.webview.set_visible(visible);
             self.visible = visible;
+        }
+    }
+    fn reparent(&mut self, hwnd: isize) {
+        if hwnd != 0 && hwnd != self.parent {
+            use wry::WebViewExtWindows;
+            if self.webview.reparent(hwnd).is_ok() {
+                self.parent = hwnd;
+            }
         }
     }
     fn ui(&mut self, ui: &mut egui::Ui) {

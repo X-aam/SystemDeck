@@ -414,10 +414,14 @@ impl App {
                 self.active_tab = None;
             }
         }
-        // Native overlay sessions (embedded browser): only the active tab is shown.
+        // Native overlay sessions (embedded browser): only the active main tab is
+        // shown here; detached sessions are drawn in their own window instead.
         let active = self.active_tab;
+        let detached = self.detached.clone();
         for s in &mut self.sessions {
-            s.set_visible(active == Some(s.id()));
+            if !detached.contains(&s.id()) {
+                s.set_visible(active == Some(s.id()));
+            }
         }
         egui::CentralPanel::default().frame(Frame::new().fill(theme::panel())).show(ctx, |ui| {
             // The large entry header is only useful on the Details tab; a live
@@ -429,16 +433,54 @@ impl App {
 
             if !self.sessions.is_empty() && !self.focus_mode {
                 Frame::new().inner_margin(Margin { left: 16, right: 16, top: 5, bottom: 5 }).fill(theme::panel()).show(ui, |ui| {
-                    ui.horizontal_wrapped(|ui| {
-                        if tab_pill(ui, None, "Details", self.active_tab.is_none(), false).0.clicked() {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 4.0;
+                        if nav_toggle(ui, self.nav_collapsed).clicked() {
+                            actions.push(Action::ToggleNav);
+                        }
+                        if tab_pill(ui, None, "Details", self.active_tab.is_none(), false, None).0.clicked() {
                             actions.push(Action::ActivateTab(None));
                         }
+                        // Chrome-style tabs: share the remaining width, shrinking
+                        // (and truncating titles) as more tabs open.
+                        let n = self.sessions.len().max(1) as f32;
+                        let avail = (ui.available_width() - 2.0).max(0.0);
+                        let tab_w = (avail / n - 4.0).clamp(42.0, 210.0);
+                        // Session pills, draggable to reorder.
+                        let pointer_x = ui.input(|i| i.pointer.hover_pos().map(|p| p.x));
+                        let mut centers: Vec<(Uuid, f32)> = Vec::new();
                         for s in &self.sessions {
-                            let (resp, close) = tab_pill(ui, Some(status_color(&s.status())), &format!("{}  {}", s.badge(), s.title()), self.active_tab == Some(s.id()), true);
+                            let detached = self.detached.contains(&s.id());
+                            let dragging = self.tab_drag == Some(s.id());
+                            let title = if detached { format!("⧉ {}  {}", s.badge(), s.title()) } else { format!("{}  {}", s.badge(), s.title()) };
+                            let (resp, close) = tab_pill(ui, Some(status_color(&s.status())), &title, self.active_tab == Some(s.id()) || dragging, true, Some(tab_w));
+                            let resp = resp.on_hover_text(format!("{}  {}", s.badge(), s.title()));
+                            centers.push((s.id(), resp.rect.center().x));
+                            let resp = if detached { resp.on_hover_text("Detached into its own window - click to bring it back") } else { resp };
+                            if resp.drag_started() {
+                                self.tab_drag = Some(s.id());
+                            }
                             if close {
                                 actions.push(Action::CloseSession(s.id()));
                             } else if resp.clicked() {
-                                actions.push(Action::ActivateTab(Some(s.id())));
+                                // Clicking a detached tab re-attaches it; otherwise just activate.
+                                actions.push(if detached { Action::ToggleDetach(s.id()) } else { Action::ActivateTab(Some(s.id())) });
+                            }
+                        }
+                        // Live reorder while a tab is dragged.
+                        if let Some(drag_id) = self.tab_drag {
+                            if ui.input(|i| i.pointer.any_down()) {
+                                if let (Some(px), Some(from)) = (pointer_x, self.sessions.iter().position(|s| s.id() == drag_id)) {
+                                    let target = centers.iter().position(|(_, cx)| px < *cx).unwrap_or(self.sessions.len().saturating_sub(1));
+                                    let target = target.min(self.sessions.len() - 1);
+                                    if from != target {
+                                        let s = self.sessions.remove(from);
+                                        self.sessions.insert(target, s);
+                                        ui.ctx().request_repaint();
+                                    }
+                                }
+                            } else {
+                                self.tab_drag = None;
                             }
                         }
                     });
@@ -473,10 +515,19 @@ impl App {
                                 ui.separator();
                             }
                             session.toolbar(ui);
+                            let (sid, eid) = (session.id(), session.entry_id());
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                                 let label = if focus_mode { "Exit full screen" } else { "Full screen" };
                                 if ui.button(label).on_hover_text("Hide the lists and fill the screen with this session").clicked() {
                                     actions.push(Action::ToggleFullScreen);
+                                }
+                                if !focus_mode {
+                                    if ui.button("⧉ Detach").on_hover_text("Pop this session out into its own window").clicked() {
+                                        actions.push(Action::ToggleDetach(sid));
+                                    }
+                                    if ui.button("+ Tab").on_hover_text("Open another session of this connection").clicked() {
+                                        actions.push(Action::OpenAnother(eid));
+                                    }
                                 }
                             });
                         });
@@ -500,6 +551,57 @@ impl App {
         });
     }
 
+    /// Draws each detached session in its own OS window (egui viewport).
+    pub(super) fn detached_windows(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        // Forget detaches whose session has closed.
+        self.detached.retain(|d| self.sessions.iter().any(|s| s.id() == *d));
+        if self.detached.is_empty() {
+            return;
+        }
+        let ids: Vec<Uuid> = self.detached.iter().copied().collect();
+        for id in ids {
+            let Some(pos) = self.sessions.iter().position(|s| s.id() == id) else { continue };
+            let title = format!("SystemDeck — {}  {}", self.sessions[pos].badge(), self.sessions[pos].title());
+            let vid = egui::ViewportId::from_hash_of(("detached", id));
+            let builder = egui::ViewportBuilder::default().with_title(&title).with_inner_size([1024.0, 680.0]);
+            let mut reattach = false;
+            let sessions = &mut self.sessions;
+            ctx.show_viewport_immediate(vid, builder, |ctx, _class| {
+                if ctx.input(|i| i.viewport().close_requested()) {
+                    reattach = true;
+                }
+                let Some(s) = sessions.get_mut(pos) else { return };
+                // Move a native (browser) child window into this viewport.
+                #[cfg(windows)]
+                if let Some(hwnd) = crate::sessions::find_window_by_title(&title) {
+                    s.reparent(hwnd);
+                }
+                egui::CentralPanel::default().frame(Frame::new().fill(theme::panel())).show(ctx, |ui| {
+                    Frame::new().fill(theme::subtle()).inner_margin(Margin::symmetric(14, 5)).show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            s.toolbar(ui);
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.button("⧉ Re-attach").on_hover_text("Put this session back in the main window").clicked() {
+                                    reattach = true;
+                                }
+                            });
+                        });
+                    });
+                    s.set_visible(true);
+                    s.ui(ui);
+                });
+            });
+            if reattach {
+                // Put a native child back under the main window before re-attaching.
+                #[cfg(windows)]
+                if let (Some(hwnd), Some(s)) = (self.window_handle, self.sessions.get_mut(pos)) {
+                    s.reparent(hwnd);
+                }
+                actions.push(Action::ToggleDetach(id));
+            }
+        }
+    }
+
     fn content_header(&mut self, ui: &mut egui::Ui, actions: &mut Vec<Action>) {
         let session = self.active_tab.and_then(|id| self.sessions.iter().find(|s| s.id() == id));
         let entry = match session {
@@ -511,6 +613,9 @@ impl App {
         Frame::new().inner_margin(Margin { left: 22, right: 18, top: 14, bottom: 14 }).show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.set_min_height(44.0);
+                if nav_toggle(ui, self.nav_collapsed).clicked() {
+                    actions.push(Action::ToggleNav);
+                }
                 match entry {
                     Some(le) => {
                         let e = &le.entry;
@@ -844,6 +949,22 @@ fn search_box(ui: &mut egui::Ui, text: &mut String) {
 }
 
 /// Heading of one vault in the all-vaults list (click to fold).
+/// Hamburger button that shows/hides the connection list (painter-drawn so it
+/// renders without special glyphs).
+fn nav_toggle(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), Sense::click());
+    let painter = ui.painter_at(rect);
+    if resp.hovered() {
+        painter.rect_filled(rect, 6.0, theme::row_hover());
+    }
+    let c = rect.center();
+    let col = if collapsed { theme::ACCENT } else { theme::text_weak() };
+    for dy in [-5.0_f32, 0.0, 5.0] {
+        painter.hline((c.x - 7.0)..=(c.x + 7.0), c.y + dy, Stroke::new(2.0_f32, col));
+    }
+    resp.on_hover_text(if collapsed { "Show the connection list" } else { "Hide the connection list" })
+}
+
 fn vault_header(ui: &mut egui::Ui, v: &CachedVault, count: usize, collapsed: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::click());
     let painter = ui.painter_at(rect);
@@ -950,11 +1071,30 @@ fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, pic
 }
 
 /// Session/Details pill in the tab strip. Returns (response, close clicked).
-fn tab_pill(ui: &mut egui::Ui, dot: Option<Color32>, text: &str, active: bool, closable: bool) -> (egui::Response, bool) {
+fn tab_pill(ui: &mut egui::Ui, dot: Option<Color32>, text: &str, active: bool, closable: bool, fixed: Option<f32>) -> (egui::Response, bool) {
     let font = FontId::proportional(12.5);
-    let text_w = ui.fonts(|f| f.layout_no_wrap(text.to_string(), font.clone(), theme::text()).size().x);
-    let width = 24.0 + text_w + if dot.is_some() { 14.0 } else { 0.0 } + if closable { 20.0 } else { 0.0 };
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::click());
+    let dot_w = if dot.is_some() { 14.0 } else { 0.0 };
+    let close_w = if closable { 20.0 } else { 0.0 };
+    let (width, label) = {
+        let measure = |s: &str| ui.fonts(|f| f.layout_no_wrap(s.to_string(), font.clone(), theme::text()).size().x);
+        match fixed {
+            // Fixed width: truncate the label with an ellipsis to fit.
+            Some(w) => {
+                let room = (w - 24.0 - dot_w - close_w).max(8.0);
+                let mut shown = text.to_string();
+                if measure(&shown) > room {
+                    while shown.chars().count() > 1 && measure(&format!("{shown}…")) > room {
+                        shown.pop();
+                    }
+                    shown = format!("{}…", shown.trim_end());
+                }
+                (w, shown)
+            }
+            None => (24.0 + measure(text) + dot_w + close_w, text.to_string()),
+        }
+    };
+    let text = label.as_str();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, 28.0), Sense::click_and_drag());
     let painter = ui.painter();
     let (fill, fg, stroke) = if active {
         (theme::ACCENT, Color32::WHITE, Stroke::NONE)

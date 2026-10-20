@@ -2,7 +2,7 @@ use std::{collections::HashSet, time::Duration};
 
 use axum::{
     body::Bytes,
-    extract::{Path, Query, State},
+    extract::{DefaultBodyLimit, Path, Query, State},
     http::header,
     response::IntoResponse,
     routing::{get, post, put},
@@ -36,7 +36,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/downloads", get(list_downloads))
         .route("/api/downloads/{name}", get(download_file))
         .route("/api/recordings", post(recording_start))
-        .route("/api/recordings/{id}/chunk", post(recording_chunk))
+        // Recording chunks can be large (a full rrweb DOM snapshot or a batch
+        // of screen frames), so lift the default 2 MB body limit for this route.
+        .route("/api/recordings/{id}/chunk", post(recording_chunk).layer(DefaultBodyLimit::max(64 * 1024 * 1024)))
         .route("/api/recordings/{id}/finish", post(recording_finish))
         .route("/api/admin/recordings", get(admin_recordings))
         .route("/api/admin/recordings/{id}", get(admin_recording_data).delete(admin_delete_recording))
