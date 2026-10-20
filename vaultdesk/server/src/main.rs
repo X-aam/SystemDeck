@@ -71,7 +71,6 @@ struct Args {
 #[derive(Clone)]
 pub struct AppState {
     pub db: Arc<Db>,
-    pub ai: Option<crate::ai::Ai>,
     pub downloads: PathBuf,
     pub started_at: Instant,
     /// Last authenticated request per user (in memory; drives "online now").
@@ -115,31 +114,35 @@ async fn main() -> Result<()> {
         println!("============================================================");
     }
 
-    let downloads = args.downloads_dir.unwrap_or_else(|| {
+    let downloads = args.downloads_dir.clone().unwrap_or_else(|| {
         std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("downloads"))).unwrap_or_else(|| PathBuf::from("downloads"))
     });
     let db = Arc::new(db);
 
-    // Retention: prune on start, then once a day in the background.
-    let (rec_days, audit_days) = (args.recording_retention_days, args.audit_retention_days);
-    if rec_days > 0 || audit_days > 0 {
-        prune(&db, rec_days, audit_days);
+    // The dashboard-editable config in the DB is the source of truth; seed it
+    // once from CLI/env for an existing deployment, then it is managed from the UI.
+    seed_config_from_args(&db, &args)?;
+    if db.config()?.ai_url.trim().is_empty() {
+        tracing::info!("AI features disabled (set an endpoint in the dashboard Settings)");
+    } else {
+        tracing::info!("AI features enabled");
+    }
+
+    // Retention runs daily, always reading the current config.
+    {
         let bg = db.clone();
         tokio::spawn(async move {
             let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
-            tick.tick().await; // the immediate first tick; we already pruned above
             loop {
                 tick.tick().await;
-                prune(&bg, rec_days, audit_days);
+                if let Ok(c) = bg.config() {
+                    prune(&bg, c.recording_retention_days, c.audit_retention_days);
+                }
             }
         });
     }
 
-    let ai = ai::Ai::new(args.ai_url, args.ai_model, args.ai_key);
-    if let Some(ai) = &ai {
-        tracing::info!("AI features enabled (model {})", ai.model());
-    }
-    let state = AppState { db, ai, downloads, started_at: Instant::now(), last_seen: Arc::new(Mutex::new(HashMap::new())) };
+    let state = AppState { db, downloads, started_at: Instant::now(), last_seen: Arc::new(Mutex::new(HashMap::new())) };
     let app = routes::router(state);
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -150,6 +153,53 @@ async fn main() -> Result<()> {
             let _ = tokio::signal::ctrl_c().await;
         })
         .await?;
+    Ok(())
+}
+
+impl AppState {
+    /// Builds an AI client from the current (dashboard-editable) config,
+    /// or None when no endpoint is configured.
+    pub fn ai(&self) -> Option<crate::ai::Ai> {
+        let c = self.db.config().ok()?;
+        crate::ai::Ai::new(Some(c.ai_url), Some(c.ai_model), Some(c.ai_key))
+    }
+}
+
+/// Seeds the DB config from CLI/env the first time each field is empty, so an
+/// existing env-based deployment keeps working after the move to UI config.
+fn seed_config_from_args(db: &Db, args: &Args) -> Result<()> {
+    let mut c = db.config()?;
+    let mut changed = false;
+    let take = |opt: &Option<String>| opt.as_deref().map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
+    if c.ai_url.is_empty() {
+        if let Some(v) = take(&args.ai_url) {
+            c.ai_url = v;
+            changed = true;
+        }
+    }
+    if c.ai_model.is_empty() {
+        if let Some(v) = take(&args.ai_model) {
+            c.ai_model = v;
+            changed = true;
+        }
+    }
+    if c.ai_key.is_empty() {
+        if let Some(v) = take(&args.ai_key) {
+            c.ai_key = v;
+            changed = true;
+        }
+    }
+    if c.recording_retention_days == 0 && args.recording_retention_days > 0 {
+        c.recording_retention_days = args.recording_retention_days;
+        changed = true;
+    }
+    if c.audit_retention_days == 0 && args.audit_retention_days > 0 {
+        c.audit_retention_days = args.audit_retention_days;
+        changed = true;
+    }
+    if changed {
+        db.put_config(&c)?;
+    }
     Ok(())
 }
 

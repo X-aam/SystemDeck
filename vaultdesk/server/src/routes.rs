@@ -48,6 +48,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users/{username}/revoke", post(admin_revoke_sessions))
         .route("/api/admin/stats", get(admin_stats))
         .route("/api/admin/audit", get(admin_audit))
+        .route("/api/admin/config", get(admin_get_config).put(admin_put_config))
+        .route("/api/admin/config/test-ai", post(admin_test_ai))
         .route("/api/admin/vaults/{id}/entries", get(admin_vault_entries))
         .route("/api/admin/vaults/{id}/entries/{entry}/recording", put(admin_entry_recording))
         .route("/api/admin/teams", get(admin_teams).post(admin_create_team))
@@ -299,6 +301,68 @@ struct AuditQuery {
     action: Option<String>,
 }
 
+async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<ServerConfig>> {
+    let c = st.db.config()?;
+    Ok(Json(ServerConfig {
+        ai_enabled: !c.ai_url.trim().is_empty(),
+        ai_key_set: !c.ai_key.is_empty(),
+        ai_url: c.ai_url,
+        ai_model: c.ai_model,
+        recording_retention_days: c.recording_retention_days,
+        audit_retention_days: c.audit_retention_days,
+    }))
+}
+
+async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<ServerConfigUpdate>) -> ApiResult<Json<ServerConfig>> {
+    let mut c = st.db.config()?;
+    if let Some(v) = req.ai_url {
+        c.ai_url = v.trim().trim_end_matches('/').to_string();
+    }
+    if let Some(v) = req.ai_model {
+        c.ai_model = v.trim().to_string();
+    }
+    if let Some(v) = req.ai_key {
+        c.ai_key = v; // empty string clears it
+    }
+    if let Some(v) = req.recording_retention_days {
+        c.recording_retention_days = v.max(0);
+    }
+    if let Some(v) = req.audit_retention_days {
+        c.audit_retention_days = v.max(0);
+    }
+    st.db.put_config(&c)?;
+    st.db.audit(&admin.username, "config_update", "server settings", if c.ai_url.is_empty() { "AI off" } else { "AI on" });
+    admin_get_config(State(st), AdminUser(admin)).await
+}
+
+#[derive(serde::Deserialize)]
+struct TestAi {
+    #[serde(default)]
+    ai_url: Option<String>,
+    #[serde(default)]
+    ai_model: Option<String>,
+    #[serde(default)]
+    ai_key: Option<String>,
+}
+
+/// Tests an AI endpoint: the one in the body if given, else the saved config.
+async fn admin_test_ai(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
+    let saved = st.db.config()?;
+    let url = req.ai_url.filter(|s| !s.trim().is_empty()).unwrap_or(saved.ai_url);
+    let model = req.ai_model.filter(|s| !s.trim().is_empty()).unwrap_or(saved.ai_model);
+    // An empty key in the body means "use the saved key"; a non-empty one overrides.
+    let key = match req.ai_key {
+        Some(k) if !k.is_empty() => k,
+        _ => saved.ai_key,
+    };
+    let ai = crate::ai::Ai::new(Some(url), Some(model), Some(key))
+        .ok_or_else(|| ApiError::bad_request("no AI endpoint URL to test"))?;
+    match ai.ping().await {
+        Ok(reply) => Ok(Json(json!({ "ok": true, "reply": reply.chars().take(120).collect::<String>() }))),
+        Err(e) => Ok(Json(json!({ "ok": false, "error": format!("{e:#}") }))),
+    }
+}
+
 async fn admin_audit(State(st): State<AppState>, _a: AdminUser, Query(q): Query<AuditQuery>) -> ApiResult<Json<Vec<AuditEvent>>> {
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let user = q.user.as_deref().filter(|s| !s.is_empty());
@@ -519,7 +583,7 @@ async fn admin_delete_recording(State(st): State<AppState>, AdminUser(admin): Ad
 
 /// AI: summarise a recording and flag sensitive actions, caching the result.
 async fn admin_summarize_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<RecordingMeta>> {
-    let ai = st.ai.as_ref().ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured on this server (set --ai-url)"))?;
+    let ai = st.ai().ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured (set an endpoint in Settings)"))?;
     let mut meta = st.db.recording(id)?.ok_or_else(|| ApiError::not_found("recording not found"))?;
     let data = st.db.read_recording(id)?;
     let transcript = transcript_for_ai(meta.kind, &data);

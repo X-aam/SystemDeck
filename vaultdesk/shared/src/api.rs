@@ -145,6 +145,34 @@ pub struct VaultRequest {
     pub record_ssh: Option<bool>,
 }
 
+/// Server configuration shown in the dashboard Settings page. The AI key is
+/// never returned (only whether one is set).
+#[derive(Serialize, Deserialize, Clone, Default)]
+pub struct ServerConfig {
+    pub ai_url: String,
+    pub ai_model: String,
+    pub ai_key_set: bool,
+    pub ai_enabled: bool,
+    pub recording_retention_days: i64,
+    pub audit_retention_days: i64,
+}
+
+/// Config changes from the dashboard. `None` leaves a field unchanged; an empty
+/// `ai_key` string clears the stored key.
+#[derive(Serialize, Deserialize, Default)]
+pub struct ServerConfigUpdate {
+    #[serde(default)]
+    pub ai_url: Option<String>,
+    #[serde(default)]
+    pub ai_model: Option<String>,
+    #[serde(default)]
+    pub ai_key: Option<String>,
+    #[serde(default)]
+    pub recording_retention_days: Option<i64>,
+    #[serde(default)]
+    pub audit_retention_days: Option<i64>,
+}
+
 /// One recorded action in the server audit log.
 #[derive(Serialize, Deserialize, Clone)]
 pub struct AuditEvent {

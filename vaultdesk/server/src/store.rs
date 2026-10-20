@@ -33,6 +33,8 @@ const META: Tbl = TableDefinition::new("meta");
 const RECORDINGS: Tbl = TableDefinition::new("recordings");
 /// Audit log. Key: `{timestamp_millis:013}-{uuid}` so it sorts oldest-first.
 const AUDIT: Tbl = TableDefinition::new("audit");
+/// Server configuration (AI endpoint, retention). One sealed row under "config".
+const CONFIG: Tbl = TableDefinition::new("config");
 
 const SESSION_TTL_DAYS: i64 = 7;
 
@@ -61,6 +63,18 @@ impl StoredUser {
 pub struct Session {
     pub username: String,
     pub expires_at: DateTime<Utc>,
+}
+
+/// Server settings edited from the dashboard (sealed at rest). Source of truth;
+/// seeded once from CLI/env on first start.
+#[derive(Serialize, Deserialize, Clone, Default)]
+#[serde(default)]
+pub struct Config {
+    pub ai_url: String,
+    pub ai_model: String,
+    pub ai_key: String,
+    pub recording_retention_days: i64,
+    pub audit_retention_days: i64,
 }
 
 pub fn token_hash(token: &str) -> String {
@@ -94,7 +108,7 @@ impl Db {
     pub fn open(path: &Path, key: Key) -> Result<Self> {
         let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
         let tx = db.begin_write()?;
-        for table in [USERS, SESSIONS, TEAMS, VAULTS, ENTRIES, META, RECORDINGS, AUDIT] {
+        for table in [USERS, SESSIONS, TEAMS, VAULTS, ENTRIES, META, RECORDINGS, AUDIT, CONFIG] {
             tx.open_table(table)?;
         }
         tx.commit()?;
@@ -353,6 +367,31 @@ impl Db {
             self.delete_recording(*id)?;
         }
         Ok(old.len())
+    }
+
+    // ---- server configuration (sealed) ----
+
+    pub fn config(&self) -> Result<Config> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(CONFIG)?;
+        match t.get("config")? {
+            Some(v) => {
+                let plain = crypto::open(&self.key, v.value()).context("decrypting config")?;
+                Ok(serde_json::from_slice(&plain)?)
+            }
+            None => Ok(Config::default()),
+        }
+    }
+
+    pub fn put_config(&self, config: &Config) -> Result<()> {
+        let sealed = crypto::seal(&self.key, &serde_json::to_vec(config)?);
+        let tx = self.db.begin_write()?;
+        {
+            let mut t = tx.open_table(CONFIG)?;
+            t.insert("config", sealed.as_slice())?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     // ---- audit log ----

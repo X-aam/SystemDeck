@@ -173,3 +173,5 @@ code { font-family: ui-monospace, Consolas, monospace; background: var(--hover);
 .ai-summary .ai-text { font-size: 13.5px; line-height: 1.5; }
 .ai-summary .ai-flags { margin: 8px 0 8px 18px; color: var(--danger); font-size: 13px; }
 .ai-summary button { margin-top: 8px; }
+
+.ok-text { color: var(--accent-dark); }

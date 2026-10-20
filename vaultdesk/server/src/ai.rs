@@ -80,6 +80,11 @@ impl Ai {
         parsed.choices.into_iter().next().map(|c| c.message.content).context("the AI returned no choices")
     }
 
+    /// Quick reachability/auth check: a one-token prompt. Returns the reply.
+    pub async fn ping(&self) -> Result<String> {
+        self.chat("You are a health check.", "Reply with the single word OK.", false).await
+    }
+
     /// Summarises a session transcript and flags sensitive actions.
     pub async fn summarise(&self, protocol: &str, who: &str, host: &str, transcript: &str) -> Result<Summary> {
         let system = "You review IT administrator session recordings for an audit log. \

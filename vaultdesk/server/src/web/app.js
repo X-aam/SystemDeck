@@ -216,7 +216,7 @@ async function go(view) {
 
 function render() {
   for (const b of document.querySelectorAll(".nav-item")) b.classList.toggle("active", b.dataset.view === state.view);
-  const views = { overview: renderOverview, users: renderUsers, teams: renderTeams, vaults: renderVaults, recordings: renderRecordings, audit: renderAudit, download: renderDownload };
+  const views = { overview: renderOverview, users: renderUsers, teams: renderTeams, vaults: renderVaults, recordings: renderRecordings, audit: renderAudit, settings: renderSettings, download: renderDownload };
   $("actions").replaceChildren();
   views[state.view]();
 }
@@ -913,6 +913,61 @@ async function renderAudit() {
           h("thead", {}, h("tr", {}, h("th", {}, "When"), h("th", {}, "User"), h("th", {}, "Action"), h("th", {}, "Target"), h("th", {}, "Detail"))),
           h("tbody", {}, rows)))
       : h("div", { class: "empty" }, "No audit events match.")));
+}
+
+// ---------- settings ----------
+
+async function renderSettings() {
+  setHeader("Settings", "Server configuration — AI and retention");
+  let cfg;
+  try { cfg = await api("GET", "/api/admin/config"); } catch (e) { toast(e.message, true); return; }
+
+  const aiUrl = h("input", { value: cfg.ai_url || "", placeholder: "http://localhost:11434/v1" });
+  const aiModel = h("input", { value: cfg.ai_model || "", placeholder: "llama3.1" });
+  const aiKey = h("input", { type: "password", placeholder: cfg.ai_key_set ? "•••••• set — leave blank to keep" : "(none)" });
+  const recDays = h("input", { type: "number", min: "0", value: String(cfg.recording_retention_days || 0) });
+  recDays.style.width = "100px";
+  const audDays = h("input", { type: "number", min: "0", value: String(cfg.audit_retention_days || 0) });
+  audDays.style.width = "100px";
+  const testOut = h("span", { class: "muted" });
+
+  const testBtn = h("button", { class: "small" }, "Test connection");
+  testBtn.addEventListener("click", async () => {
+    testOut.className = "muted";
+    testOut.textContent = "Testing…";
+    try {
+      const r = await api("POST", "/api/admin/config/test-ai", { ai_url: aiUrl.value, ai_model: aiModel.value, ai_key: aiKey.value });
+      if (r.ok) { testOut.className = "ok-text"; testOut.textContent = "OK — " + (r.reply || "reachable"); }
+      else { testOut.className = "error"; testOut.textContent = "Failed: " + r.error; }
+    } catch (e) { testOut.className = "error"; testOut.textContent = "Failed: " + e.message; }
+  });
+
+  const save = h("button", { class: "primary" }, "Save settings");
+  save.addEventListener("click", async () => {
+    const body = {
+      ai_url: aiUrl.value,
+      ai_model: aiModel.value,
+      recording_retention_days: Number(recDays.value) || 0,
+      audit_retention_days: Number(audDays.value) || 0,
+    };
+    if (aiKey.value) body.ai_key = aiKey.value; // only change the key if a new one was typed
+    try { await api("PUT", "/api/admin/config", body); toast("Settings saved"); aiKey.value = ""; await renderSettings(); }
+    catch (e) { toast(e.message, true); }
+  });
+
+  $("view").replaceChildren(h("div", { class: "card", style: "max-width:660px" },
+    h("h3", {}, "AI — session summaries"),
+    h("p", { class: "muted" }, "Point at your own OpenAI-compatible model (Ollama / llama.cpp / vLLM). Nothing leaves your network. Leave the URL blank to disable AI."),
+    h("label", {}, "Endpoint URL (ends in /v1)", aiUrl),
+    h("label", {}, "Model", aiModel),
+    h("label", {}, "API key (optional)", aiKey),
+    h("div", { class: "grant-add" }, h("label", {}, " ", testBtn), h("label", {}, " ", testOut)),
+    h("h3", { style: "margin-top:20px" }, "Retention"),
+    h("div", { class: "grant-add" },
+      h("label", {}, "Recordings older than (days)", recDays),
+      h("label", {}, "Audit entries older than (days)", audDays)),
+    h("p", { class: "muted" }, "0 = keep forever. Pruned on start and daily."),
+    h("div", { style: "margin-top:16px" }, save)));
 }
 
 // ---------- download ----------
