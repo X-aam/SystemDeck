@@ -145,6 +145,20 @@ pub struct VaultRequest {
     pub record_ssh: Option<bool>,
 }
 
+/// One recorded action in the server audit log.
+#[derive(Serialize, Deserialize, Clone)]
+pub struct AuditEvent {
+    pub at: chrono::DateTime<chrono::Utc>,
+    /// Who did it (or attempted it).
+    pub username: String,
+    /// Short machine action, e.g. "login", "entry_write", "vault_delete".
+    pub action: String,
+    /// What it acted on (vault/user/entry name), may be empty.
+    pub target: String,
+    /// Extra context for the reader.
+    pub detail: String,
+}
+
 /// What a recording contains.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]

@@ -43,6 +43,15 @@ struct Args {
     /// client). Default: `downloads` next to the server executable.
     #[arg(long, env = "SYSTEMDECK_DOWNLOADS")]
     downloads_dir: Option<PathBuf>,
+
+    /// Delete finished recordings older than this many days (0 = keep forever).
+    /// Pruned on start and once a day.
+    #[arg(long, default_value_t = 0, env = "SYSTEMDECK_RECORDING_RETENTION_DAYS")]
+    recording_retention_days: i64,
+
+    /// Delete audit-log entries older than this many days (0 = keep forever).
+    #[arg(long, default_value_t = 0, env = "SYSTEMDECK_AUDIT_RETENTION_DAYS")]
+    audit_retention_days: i64,
 }
 
 #[derive(Clone)]
@@ -94,7 +103,24 @@ async fn main() -> Result<()> {
     let downloads = args.downloads_dir.unwrap_or_else(|| {
         std::env::current_exe().ok().and_then(|p| p.parent().map(|d| d.join("downloads"))).unwrap_or_else(|| PathBuf::from("downloads"))
     });
-    let state = AppState { db: Arc::new(db), downloads, started_at: Instant::now(), last_seen: Arc::new(Mutex::new(HashMap::new())) };
+    let db = Arc::new(db);
+
+    // Retention: prune on start, then once a day in the background.
+    let (rec_days, audit_days) = (args.recording_retention_days, args.audit_retention_days);
+    if rec_days > 0 || audit_days > 0 {
+        prune(&db, rec_days, audit_days);
+        let bg = db.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(24 * 60 * 60));
+            tick.tick().await; // the immediate first tick; we already pruned above
+            loop {
+                tick.tick().await;
+                prune(&bg, rec_days, audit_days);
+            }
+        });
+    }
+
+    let state = AppState { db, downloads, started_at: Instant::now(), last_seen: Arc::new(Mutex::new(HashMap::new())) };
     let app = routes::router(state);
     let listener = tokio::net::TcpListener::bind(args.bind)
         .await
@@ -106,6 +132,20 @@ async fn main() -> Result<()> {
         })
         .await?;
     Ok(())
+}
+
+/// Applies the retention policy, logging what it removed.
+fn prune(db: &Db, rec_days: i64, audit_days: i64) {
+    match db.prune_recordings(rec_days) {
+        Ok(n) if n > 0 => tracing::info!("retention: deleted {n} recording(s) older than {rec_days} days"),
+        Err(e) => tracing::warn!("recording retention failed: {e:#}"),
+        _ => {}
+    }
+    match db.prune_audit(audit_days) {
+        Ok(n) if n > 0 => tracing::info!("retention: deleted {n} audit entr(ies) older than {audit_days} days"),
+        Err(e) => tracing::warn!("audit retention failed: {e:#}"),
+        _ => {}
+    }
 }
 
 fn set_password(db: &Db, username: &str, password: &str) -> Result<()> {

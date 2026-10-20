@@ -216,7 +216,7 @@ async function go(view) {
 
 function render() {
   for (const b of document.querySelectorAll(".nav-item")) b.classList.toggle("active", b.dataset.view === state.view);
-  const views = { overview: renderOverview, users: renderUsers, teams: renderTeams, vaults: renderVaults, recordings: renderRecordings, download: renderDownload };
+  const views = { overview: renderOverview, users: renderUsers, teams: renderTeams, vaults: renderVaults, recordings: renderRecordings, audit: renderAudit, download: renderDownload };
   $("actions").replaceChildren();
   views[state.view]();
 }
@@ -821,6 +821,60 @@ async function viewRecording(r) {
   $("modal-cancel").classList.add("hidden");
   const observer = new MutationObserver(() => { if ($("modal-backdrop").classList.contains("hidden")) { stop(); observer.disconnect(); } });
   observer.observe($("modal-backdrop"), { attributes: true, attributeFilter: ["class"] });
+}
+
+// ---------- audit log ----------
+
+const AUDIT_ACTIONS = [
+  "login", "login_failed", "logout", "password_changed",
+  "entry_write", "entry_delete", "entry_recording",
+  "vault_create", "vault_update", "vault_delete",
+  "team_create", "team_update", "team_delete",
+  "user_create", "user_update", "sessions_revoked",
+  "recording_view", "recording_delete", "download",
+];
+
+async function renderAudit() {
+  setHeader("Audit log", "Every recorded action on the server, newest first", h("button", { onclick: () => go("audit") }, "Refresh"));
+
+  const userIn = h("input", { placeholder: "filter by user", value: state.auditUser || "" });
+  userIn.style.width = "160px";
+  const actionSel = h("select", {}, h("option", { value: "" }, "all actions"),
+    ...AUDIT_ACTIONS.map((a) => { const o = h("option", { value: a }, a); if (a === state.auditAction) o.selected = true; return o; }));
+  actionSel.style.width = "auto";
+  const run = async () => { state.auditUser = userIn.value.trim(); state.auditAction = actionSel.value; await renderAudit(); };
+  userIn.addEventListener("keydown", (e) => { if (e.key === "Enter") run(); });
+  actionSel.addEventListener("change", run);
+
+  let events = [];
+  try {
+    const q = new URLSearchParams({ limit: "1000" });
+    if (state.auditUser) q.set("user", state.auditUser);
+    if (state.auditAction) q.set("action", state.auditAction);
+    events = await api("GET", "/api/admin/audit?" + q.toString());
+  } catch (e) { toast(e.message, true); }
+
+  const badge = (a) => {
+    const danger = a === "login_failed" || a.endsWith("_delete");
+    const warn = a === "sessions_revoked" || a === "recording_view" || a === "entry_recording";
+    return h("span", { class: "badge " + (danger ? "danger-badge" : warn ? "warn-badge" : "neutral") }, a);
+  };
+  const rows = events.map((ev) => h("tr", {},
+    h("td", { class: "muted", title: new Date(ev.at).toLocaleString() }, new Date(ev.at).toLocaleString()),
+    h("td", {}, h("div", { class: "who" }, avatar(ev.username), ev.username)),
+    h("td", {}, badge(ev.action)),
+    h("td", {}, ev.target || h("span", { class: "muted" }, "-")),
+    h("td", { class: "muted" }, ev.detail || "")));
+
+  const bar = h("div", { class: "grant-add" }, h("label", {}, "User", userIn), h("label", {}, "Action", actionSel),
+    h("label", {}, " ", h("button", { onclick: run }, "Apply")),
+    h("label", {}, " ", h("span", { class: "muted" }, `${events.length} event(s)`)));
+  $("view").replaceChildren(h("div", {}, bar,
+    events.length
+      ? h("div", { class: "table-wrap" }, h("table", {},
+          h("thead", {}, h("tr", {}, h("th", {}, "When"), h("th", {}, "User"), h("th", {}, "Action"), h("th", {}, "Target"), h("th", {}, "Detail"))),
+          h("tbody", {}, rows)))
+      : h("div", { class: "empty" }, "No audit events match.")));
 }
 
 // ---------- download ----------

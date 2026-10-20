@@ -14,7 +14,7 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use systemdeck_core::{
-    api::{PushResult, RecordingMeta},
+    api::{AuditEvent, PushResult, RecordingMeta},
     crypto::{self, Key},
     Entry, Principal, Team, UserInfo, Vault,
 };
@@ -31,6 +31,8 @@ const ENTRIES: Tbl = TableDefinition::new("entries");
 const META: Tbl = TableDefinition::new("meta");
 /// Recording metadata; the session data lives in `recordings/<id>.rec`.
 const RECORDINGS: Tbl = TableDefinition::new("recordings");
+/// Audit log. Key: `{timestamp_millis:013}-{uuid}` so it sorts oldest-first.
+const AUDIT: Tbl = TableDefinition::new("audit");
 
 const SESSION_TTL_DAYS: i64 = 7;
 
@@ -92,7 +94,7 @@ impl Db {
     pub fn open(path: &Path, key: Key) -> Result<Self> {
         let db = Database::create(path).with_context(|| format!("opening {}", path.display()))?;
         let tx = db.begin_write()?;
-        for table in [USERS, SESSIONS, TEAMS, VAULTS, ENTRIES, META, RECORDINGS] {
+        for table in [USERS, SESSIONS, TEAMS, VAULTS, ENTRIES, META, RECORDINGS, AUDIT] {
             tx.open_table(table)?;
         }
         tx.commit()?;
@@ -332,6 +334,90 @@ impl Db {
         self.del(RECORDINGS, &id.to_string())?;
         let _ = fs::remove_file(self.recording_path(id));
         Ok(())
+    }
+
+    /// Deletes finished recordings older than `days` (retention). Returns how
+    /// many were removed. `days == 0` disables pruning.
+    pub fn prune_recordings(&self, days: i64) -> Result<usize> {
+        if days <= 0 {
+            return Ok(0);
+        }
+        let cutoff = Utc::now() - Duration::days(days);
+        let old: Vec<Uuid> = self
+            .recordings()?
+            .into_iter()
+            .filter(|r| r.finished && r.started_at < cutoff)
+            .map(|r| r.id)
+            .collect();
+        for id in &old {
+            self.delete_recording(*id)?;
+        }
+        Ok(old.len())
+    }
+
+    // ---- audit log ----
+
+    /// Records one action. Best effort: auditing never fails the request.
+    pub fn audit(&self, username: &str, action: &str, target: &str, detail: &str) {
+        let at = Utc::now();
+        let key = format!("{:013}-{}", at.timestamp_millis(), Uuid::new_v4().simple());
+        let event = AuditEvent {
+            at,
+            username: username.to_string(),
+            action: action.to_string(),
+            target: target.to_string(),
+            detail: detail.to_string(),
+        };
+        if let Err(e) = self.put(AUDIT, &key, &event) {
+            tracing::warn!("audit write failed: {e}");
+        }
+    }
+
+    /// Most recent audit events first, optionally filtered by user and action.
+    pub fn audit_log(&self, limit: usize, user: Option<&str>, action: Option<&str>) -> Result<Vec<AuditEvent>> {
+        let tx = self.db.begin_read()?;
+        let t = tx.open_table(AUDIT)?;
+        let mut out = Vec::new();
+        for item in t.iter()?.rev() {
+            let (_, v) = item?;
+            let event: AuditEvent = serde_json::from_slice(v.value())?;
+            if user.is_some_and(|u| !event.username.eq_ignore_ascii_case(u)) {
+                continue;
+            }
+            if action.is_some_and(|a| event.action != a) {
+                continue;
+            }
+            out.push(event);
+            if out.len() >= limit {
+                break;
+            }
+        }
+        Ok(out)
+    }
+
+    /// Deletes audit events older than `days` (0 = keep forever).
+    pub fn prune_audit(&self, days: i64) -> Result<usize> {
+        if days <= 0 {
+            return Ok(0);
+        }
+        let cutoff = (Utc::now() - Duration::days(days)).timestamp_millis();
+        let tx = self.db.begin_write()?;
+        let mut removed = 0;
+        {
+            let mut t = tx.open_table(AUDIT)?;
+            let old: Vec<String> = t
+                .iter()?
+                .filter_map(|r| r.ok())
+                .map(|(k, _)| k.value().to_string())
+                .take_while(|k| k.split('-').next().and_then(|m| m.parse::<i64>().ok()).is_some_and(|m| m < cutoff))
+                .collect();
+            for k in old {
+                t.remove(k.as_str())?;
+                removed += 1;
+            }
+        }
+        tx.commit()?;
+        Ok(removed)
     }
 
     // ---- entries ----

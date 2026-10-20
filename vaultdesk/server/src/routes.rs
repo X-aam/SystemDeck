@@ -44,6 +44,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/users/{username}", put(admin_update_user))
         .route("/api/admin/users/{username}/revoke", post(admin_revoke_sessions))
         .route("/api/admin/stats", get(admin_stats))
+        .route("/api/admin/audit", get(admin_audit))
         .route("/api/admin/vaults/{id}/entries", get(admin_vault_entries))
         .route("/api/admin/vaults/{id}/entries/{entry}/recording", put(admin_entry_recording))
         .route("/api/admin/teams", get(admin_teams).post(admin_create_team))
@@ -107,10 +108,12 @@ async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) -> Api
                 seen.insert(u.username.clone(), Utc::now());
             }
             tracing::info!(user = %u.username, "login");
+            st.db.audit(&u.username, "login", "", "");
             Ok(Json(LoginResponse { token, user: u.info() }))
         }
         _ => {
             tracing::warn!(user = %username, "failed login");
+            st.db.audit(&username, "login_failed", "", "");
             tokio::time::sleep(Duration::from_millis(500)).await;
             Err(ApiError::unauthorized("invalid username or password"))
         }
@@ -119,6 +122,7 @@ async fn login(State(st): State<AppState>, Json(req): Json<LoginRequest>) -> Api
 
 async fn logout(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<Value>> {
     st.db.delete_session(&auth.token_hash)?;
+    st.db.audit(&auth.user.username, "logout", "", "");
     Ok(ok())
 }
 
@@ -138,6 +142,7 @@ async fn change_password(
     let mut user = auth.user;
     user.password_hash = auth::hash_password(&req.new_password)?;
     st.db.put_user(&user)?;
+    st.db.audit(&user.username, "password_changed", "", "own password");
     Ok(ok())
 }
 
@@ -182,7 +187,9 @@ async fn push(
         let result = st.db.apply_change(id, change.entry, change.base_revision, &auth.user.username, !auth.user.is_admin)?;
         match &result {
             PushResult::Accepted { entry } => {
-                tracing::info!(user = %auth.user.username, vault = %id, entry = %entry_id, rev = entry.revision, deleted = entry.deleted, "entry written")
+                tracing::info!(user = %auth.user.username, vault = %id, entry = %entry_id, rev = entry.revision, deleted = entry.deleted, "entry written");
+                let action = if entry.deleted { "entry_delete" } else { "entry_write" };
+                st.db.audit(&auth.user.username, action, &entry.name, &format!("vault {id}"));
             }
             PushResult::Conflict { .. } => {
                 tracing::info!(user = %auth.user.username, vault = %id, entry = %entry_id, "push conflict")
@@ -204,7 +211,7 @@ async fn admin_users(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Jso
 
 async fn admin_create_user(
     State(st): State<AppState>,
-    _a: AdminUser,
+    AdminUser(admin): AdminUser,
     Json(req): Json<CreateUserRequest>,
 ) -> ApiResult<Json<UserInfo>> {
     let username = auth::validate_username(&req.username)?;
@@ -222,6 +229,7 @@ async fn admin_create_user(
         created_at: Utc::now(),
     };
     st.db.put_user(&user)?;
+    st.db.audit(&admin.username, "user_create", &user.username, if user.is_admin { "administrator" } else { "" });
     Ok(Json(user.info()))
 }
 
@@ -256,6 +264,7 @@ async fn admin_update_user(
     if revoke_sessions {
         st.db.delete_sessions_for(&user.username)?;
     }
+    st.db.audit(&admin.username, "user_update", &user.username, if user.disabled { "disabled" } else { "updated" });
     Ok(Json(user.info()))
 }
 
@@ -273,7 +282,25 @@ async fn admin_revoke_sessions(
         seen.remove(&user.username);
     }
     tracing::info!(admin = %admin.username, user = %user.username, "sessions revoked");
+    st.db.audit(&admin.username, "sessions_revoked", &user.username, "signed the user out everywhere");
     Ok(ok())
+}
+
+#[derive(serde::Deserialize, Default)]
+struct AuditQuery {
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default)]
+    user: Option<String>,
+    #[serde(default)]
+    action: Option<String>,
+}
+
+async fn admin_audit(State(st): State<AppState>, _a: AdminUser, Query(q): Query<AuditQuery>) -> ApiResult<Json<Vec<AuditEvent>>> {
+    let limit = q.limit.unwrap_or(500).clamp(1, 5000);
+    let user = q.user.as_deref().filter(|s| !s.is_empty());
+    let action = q.action.as_deref().filter(|s| !s.is_empty());
+    Ok(Json(st.db.audit_log(limit, user, action)?))
 }
 
 async fn admin_stats(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<ServerStats>> {
@@ -352,6 +379,7 @@ async fn admin_entry_recording(
     match st.db.apply_change(vault_id, entry, base, &admin.username, false)? {
         PushResult::Accepted { entry } => {
             tracing::info!(admin = %admin.username, vault = %vault_id, entry = %entry_id, record, rev = entry.revision, "entry recording changed");
+            st.db.audit(&admin.username, "entry_recording", &entry.name, if record { "recording on" } else { "recording off" });
             Ok(ok())
         }
         _ => Err(ApiError::bad_request("the entry changed meanwhile - reload and try again")),
@@ -389,6 +417,7 @@ async fn download_file(State(st): State<AppState>, auth: AuthUser, Path(name): P
         .map_err(|e| ApiError::from(anyhow::anyhow!("reading {name}: {e}")))?
         .map_err(|e| ApiError::from(anyhow::anyhow!("reading {name}: {e}")))?;
     tracing::info!(user = %auth.user.username, file = %name, "download");
+    st.db.audit(&auth.user.username, "download", &name, "");
     Ok((
         [
             (header::CONTENT_TYPE, "application/octet-stream".to_string()),
@@ -463,6 +492,7 @@ async fn admin_recording_data(State(st): State<AppState>, AdminUser(admin): Admi
     let meta = st.db.recording(id)?.ok_or_else(|| ApiError::not_found("recording not found"))?;
     let data = st.db.read_recording(id)?;
     tracing::info!(admin = %admin.username, recording = %id, "recording viewed");
+    st.db.audit(&admin.username, "recording_view", &format!("{} on {}", meta.username, meta.host), &meta.entry_name);
     let (ext, mime) = match meta.kind {
         RecordingKind::Ssh => ("cast", "application/x-asciicast"),
         RecordingKind::Screen => ("sdrec", "application/x-ndjson"),
@@ -478,6 +508,7 @@ async fn admin_recording_data(State(st): State<AppState>, AdminUser(admin): Admi
 async fn admin_delete_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
     st.db.delete_recording(id)?;
     tracing::info!(admin = %admin.username, recording = %id, "recording deleted");
+    st.db.audit(&admin.username, "recording_delete", &id.to_string(), "");
     Ok(ok())
 }
 
@@ -498,18 +529,19 @@ async fn admin_teams(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Jso
     Ok(Json(teams))
 }
 
-async fn admin_create_team(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TeamRequest>) -> ApiResult<Json<Team>> {
+async fn admin_create_team(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<TeamRequest>) -> ApiResult<Json<Team>> {
     if req.name.trim().is_empty() {
         return Err(ApiError::bad_request("team name is required"));
     }
     let team = Team { id: Uuid::new_v4(), name: req.name.trim().to_string(), members: clean_members(req.members) };
     st.db.put_team(&team)?;
+    st.db.audit(&admin.username, "team_create", &team.name, &format!("{} member(s)", team.members.len()));
     Ok(Json(team))
 }
 
 async fn admin_update_team(
     State(st): State<AppState>,
-    _a: AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
     Json(req): Json<TeamRequest>,
 ) -> ApiResult<Json<Team>> {
@@ -519,11 +551,14 @@ async fn admin_update_team(
     }
     team.members = clean_members(req.members);
     st.db.put_team(&team)?;
+    st.db.audit(&admin.username, "team_update", &team.name, &format!("{} member(s)", team.members.len()));
     Ok(Json(team))
 }
 
-async fn admin_delete_team(State(st): State<AppState>, _a: AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+async fn admin_delete_team(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    let name = st.db.team(id)?.map(|t| t.name).unwrap_or_default();
     st.db.delete_team(id)?;
+    st.db.audit(&admin.username, "team_delete", &name, "");
     Ok(ok())
 }
 
@@ -533,7 +568,7 @@ async fn admin_vaults(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Js
     Ok(Json(vaults))
 }
 
-async fn admin_create_vault(State(st): State<AppState>, _a: AdminUser, Json(req): Json<VaultRequest>) -> ApiResult<Json<Vault>> {
+async fn admin_create_vault(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<VaultRequest>) -> ApiResult<Json<Vault>> {
     if req.name.trim().is_empty() {
         return Err(ApiError::bad_request("vault name is required"));
     }
@@ -546,12 +581,13 @@ async fn admin_create_vault(State(st): State<AppState>, _a: AdminUser, Json(req)
         created_at: Utc::now(),
     };
     st.db.put_vault(&vault)?;
+    st.db.audit(&admin.username, "vault_create", &vault.name, "");
     Ok(Json(vault))
 }
 
 async fn admin_update_vault(
     State(st): State<AppState>,
-    _a: AdminUser,
+    AdminUser(admin): AdminUser,
     Path(id): Path<Uuid>,
     Json(req): Json<VaultRequest>,
 ) -> ApiResult<Json<Vault>> {
@@ -565,10 +601,13 @@ async fn admin_update_vault(
         vault.record_ssh = record;
     }
     st.db.put_vault(&vault)?;
+    st.db.audit(&admin.username, "vault_update", &vault.name, &format!("{} grant(s), recording {}", vault.grants.len(), if vault.record_ssh { "on" } else { "off" }));
     Ok(Json(vault))
 }
 
-async fn admin_delete_vault(State(st): State<AppState>, _a: AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+async fn admin_delete_vault(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    let name = st.db.vault(id)?.map(|v| v.name).unwrap_or_default();
     st.db.delete_vault(id)?;
+    st.db.audit(&admin.username, "vault_delete", &name, "");
     Ok(ok())
 }
