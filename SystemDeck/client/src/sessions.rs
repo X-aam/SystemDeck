@@ -357,13 +357,13 @@ impl Session {
                         ctx.request_repaint();
                     }
                     RdpOutputEvent::ConnectionFailure(e) => {
-                        state.set_status(Status::Failed(rdp_error_text(&format!("{e}"))));
+                        state.set_status(Status::Failed(rdp_error_text(&error_chain(&e))));
                         ctx.request_repaint();
                     }
                     RdpOutputEvent::Terminated(result) => {
                         let msg = match result {
                             Ok(reason) => format!("Session ended: {reason}"),
-                            Err(e) => rdp_error_text(&format!("{e}")),
+                            Err(e) => rdp_error_text(&error_chain(&e)),
                         };
                         let current = state.status.lock().unwrap().clone();
                         if !matches!(current, Status::Failed(_)) {
@@ -936,6 +936,23 @@ fn hostname() -> String {
 }
 
 /// Turns IronRDP's error chain into something an admin can act on.
+/// Flattens an error and its `source()` chain into one line, so the real cause
+/// (e.g. which Fast-Path update failed to decode) is visible, not just the
+/// opaque top-level "custom error".
+fn error_chain<E: std::error::Error>(e: &E) -> String {
+    let mut out = e.to_string();
+    let mut src = e.source();
+    while let Some(inner) = src {
+        let text = inner.to_string();
+        if !out.contains(&text) {
+            out.push_str(" — ");
+            out.push_str(&text);
+        }
+        src = inner.source();
+    }
+    out
+}
+
 fn rdp_error_text(raw: &str) -> String {
     let lower = raw.to_lowercase();
     let hint = if lower.contains("logon") || lower.contains("credssp") || lower.contains("authentication") || lower.contains("0xc000006d") {
