@@ -544,13 +544,67 @@ async function showEntries(v) {
         h("div", {}, e.name),
         h("div", { class: "muted" }, [e.group, e.username && e.host ? `${e.username}@${e.host}` : e.host].filter(Boolean).join(" · "))),
       recSwitch(e),
+      h("button", { class: "small", onclick: () => editEntry(v, e) }, "Edit"),
+      h("button", { class: "small", onclick: () => dupEntry(v, e) }, "Duplicate"),
       h("span", { class: "muted", title: new Date(e.updated_at).toLocaleString() }, `${e.updated_by || "-"} · ${ago(e.updated_at)}`))))
     : h("p", { class: "muted" }, "This vault is empty. Users add entries from the desktop client.");
   const hint = v.record_ssh
     ? "Every SSH/RDP/VNC session in this vault is recorded (vault Settings)."
     : "Record: record that entry's SSH/RDP/VNC sessions. Or record the whole vault in Settings.";
-  modal(`${v.name}: ${entries.length} entries`, h("div", {}, body, h("p", { class: "muted", style: "margin-top:12px" }, `${hint} Passwords are never shown here.`)), "Close", async () => {}, { wide: true });
+  modal(`${v.name}: ${entries.length} entries`, h("div", {}, body, h("p", { class: "muted", style: "margin-top:12px" }, `${hint} Edit opens the full entry, including its password.`)), "Close", async () => {}, { wide: true });
   $("modal-cancel").classList.add("hidden");
+}
+
+async function dupEntry(v, e) {
+  try {
+    await api("POST", `/api/admin/vaults/${v.id}/entries/${e.id}/duplicate`);
+    toast(`Duplicated "${e.name}"`);
+    await loadAll();
+    showEntries(v);
+  } catch (err) { toast(err.message, true); }
+}
+
+async function editEntry(v, summary) {
+  let e;
+  try { e = await api("GET", `/api/admin/vaults/${v.id}/entries/${summary.id}`); } catch (err) { toast(err.message, true); return; }
+  const f = {
+    name: h("input", { value: e.name || "" }),
+    group: h("input", { value: e.group || "" }),
+    host: h("input", { value: e.host || "" }),
+    port: h("input", { type: "number", value: e.port != null ? String(e.port) : "" }),
+    username: h("input", { value: e.username || "" }),
+    password: h("input", { type: "password", value: e.password || "" }),
+    domain: h("input", { value: e.domain || "" }),
+    url: h("input", { value: e.url || "" }),
+    notes: h("textarea", { rows: "3" }, e.notes || ""),
+  };
+  const reveal = h("button", { class: "small", type: "button" }, "Show");
+  reveal.addEventListener("click", () => {
+    const hidden = f.password.type === "password";
+    f.password.type = hidden ? "text" : "password";
+    reveal.textContent = hidden ? "Hide" : "Show";
+  });
+  modal(`Edit: ${e.name}`, h("div", {},
+    h("label", {}, "Name", f.name),
+    h("label", {}, "Group", f.group),
+    h("label", {}, "Host", f.host),
+    h("label", {}, "Port", f.port),
+    h("label", {}, "Username", f.username),
+    h("label", {}, "Password", h("div", { class: "row-actions" }, f.password, reveal)),
+    h("label", {}, "Domain", f.domain),
+    h("label", {}, "URL", f.url),
+    h("label", {}, "Notes", f.notes)), "Save", async () => {
+    const updated = Object.assign({}, e, {
+      name: f.name.value, group: f.group.value, host: f.host.value,
+      port: f.port.value ? Number(f.port.value) : null,
+      username: f.username.value, password: f.password.value,
+      domain: f.domain.value, url: f.url.value, notes: f.notes.value,
+    });
+    await api("PUT", `/api/admin/vaults/${v.id}/entries/${e.id}`, updated);
+    toast("Entry saved");
+    await loadAll();
+    showEntries(v);
+  });
 }
 
 // ---------- recordings ----------

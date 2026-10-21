@@ -13,7 +13,7 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use systemdeck_core::{
     api::*,
-    Capability, Principal, Role, SystemRole, Team, UserInfo, Vault, VaultSummary,
+    Capability, Entry, Principal, Role, SystemRole, Team, UserInfo, Vault, VaultSummary,
 };
 
 use crate::{
@@ -54,6 +54,8 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/config/test-ai", post(admin_test_ai))
         .route("/api/admin/config/list-models", post(admin_list_ai_models))
         .route("/api/admin/vaults/{id}/entries", get(admin_vault_entries))
+        .route("/api/admin/vaults/{id}/entries/{entry}", get(admin_get_entry).put(admin_update_entry))
+        .route("/api/admin/vaults/{id}/entries/{entry}/duplicate", post(admin_duplicate_entry))
         .route("/api/admin/vaults/{id}/entries/{entry}/recording", put(admin_entry_recording))
         .route("/api/admin/teams", get(admin_teams).post(admin_create_team))
         .route("/api/admin/teams/{id}", put(admin_update_team).delete(admin_delete_team))
@@ -524,6 +526,67 @@ async fn admin_vault_entries(State(st): State<AppState>, auth: AuthUser, Path(id
         .collect();
     out.sort_by(|a, b| (a.group.to_lowercase(), a.name.to_lowercase()).cmp(&(b.group.to_lowercase(), b.name.to_lowercase())));
     Ok(Json(out))
+}
+
+/// Loads one full entry (including its secret) for editing in the dashboard.
+async fn admin_get_entry(State(st): State<AppState>, auth: AuthUser, Path((vault_id, entry_id)): Path<(Uuid, Uuid)>) -> ApiResult<Json<Entry>> {
+    auth.require(Capability::ManageVaults)?;
+    st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
+    let (entries, _) = st.db.entries_since(vault_id, 0)?;
+    let entry = entries.into_iter().find(|e| e.id == entry_id && !e.deleted).ok_or_else(|| ApiError::not_found("entry not found"))?;
+    Ok(Json(entry))
+}
+
+/// Edits an entry from the dashboard; written as a normal revision so clients
+/// sync it. Keeps the entry's id and vault; everything else comes from the body.
+async fn admin_update_entry(
+    State(st): State<AppState>,
+    auth: AuthUser,
+    Path((vault_id, entry_id)): Path<(Uuid, Uuid)>,
+    Json(mut body): Json<Entry>,
+) -> ApiResult<Json<Entry>> {
+    auth.require(Capability::ManageVaults)?;
+    st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
+    let (entries, _) = st.db.entries_since(vault_id, 0)?;
+    let existing = entries.into_iter().find(|e| e.id == entry_id && !e.deleted).ok_or_else(|| ApiError::not_found("entry not found"))?;
+    body.id = entry_id;
+    body.vault_id = vault_id;
+    body.deleted = false;
+    body.name = body.name.trim().to_string();
+    if body.name.is_empty() {
+        return Err(ApiError::bad_request("entry name is required"));
+    }
+    match st.db.apply_change(vault_id, body, existing.revision, &auth.user.username, false)? {
+        PushResult::Accepted { entry } => {
+            st.db.audit(&auth.user.username, "entry_write", &entry.name, &format!("vault {vault_id} (dashboard)"));
+            Ok(Json(entry))
+        }
+        _ => Err(ApiError::bad_request("the entry changed meanwhile - reload and try again")),
+    }
+}
+
+/// Duplicates an entry within its vault (new id, name + " (copy)").
+async fn admin_duplicate_entry(State(st): State<AppState>, auth: AuthUser, Path((vault_id, entry_id)): Path<(Uuid, Uuid)>) -> ApiResult<Json<Entry>> {
+    auth.require(Capability::ManageVaults)?;
+    st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
+    let (entries, _) = st.db.entries_since(vault_id, 0)?;
+    let src = entries.into_iter().find(|e| e.id == entry_id && !e.deleted).ok_or_else(|| ApiError::not_found("entry not found"))?;
+    let copy = Entry {
+        id: Uuid::new_v4(),
+        vault_id,
+        revision: 0,
+        name: format!("{} (copy)", src.name),
+        updated_by: auth.user.username.clone(),
+        updated_at: Utc::now(),
+        ..src
+    };
+    match st.db.apply_change(vault_id, copy, 0, &auth.user.username, false)? {
+        PushResult::Accepted { entry } => {
+            st.db.audit(&auth.user.username, "entry_duplicate", &entry.name, &format!("vault {vault_id}"));
+            Ok(Json(entry))
+        }
+        _ => Err(ApiError::bad_request("could not duplicate the entry")),
+    }
 }
 
 /// Entry-level recording switch from the dashboard. Written as a normal
