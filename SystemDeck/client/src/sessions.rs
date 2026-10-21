@@ -317,7 +317,11 @@ impl Session {
             // surface commands ("Fast-Path custom error" at session teardown). Without it
             // the server falls back to standard bitmap updates, which decode reliably.
             .with_codecs(vec!["remotefx:off".to_string()])
-            .with_compression(screen.quality != Quality::Best);
+            // No bulk (MPPC) compression: after a Deactivation-Reactivation (Windows does one
+            // right after logon) IronRDP's client rebuilds its Fast-Path processor without a
+            // decompressor, so compressed updates reach the decoders raw and fail with
+            // "not enough bytes". Bitmaps still use their own RLE compression.
+            .with_compression(false);
         if !entry.domain.trim().is_empty() {
             builder = builder.with_domain(entry.domain.trim());
         }

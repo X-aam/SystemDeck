@@ -22,6 +22,11 @@ chacha20poly1305 = "0.10"
 redb = "2"
 hex = "0.4"
 
+# Patched IronRDP: tolerate undecodable Fast-Path pointer (cursor) updates instead
+# of dropping the whole RDP session. See vendor/ironrdp-session/src/fast_path.rs.
+[patch.crates-io]
+ironrdp-session = { path = "vendor/ironrdp-session" }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

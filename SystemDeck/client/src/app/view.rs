@@ -533,9 +533,14 @@ impl App {
                 Some(session) => {
                     let status = session.status();
                     if let Status::Failed(_) | Status::Closed(_) = status {
+                        let err_text = status_text(&status);
                         Frame::new().fill(theme::danger_bg()).inner_margin(Margin::symmetric(16, 8)).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(status_text(&status)).color(theme::DANGER));
+                            ui.horizontal_wrapped(|ui| {
+                                // Selectable so the full message can be dragged out, plus a one-click copy.
+                                ui.add(egui::Label::new(RichText::new(&err_text).color(theme::DANGER)).selectable(true));
+                                if ui.button("Copy error").on_hover_text("Copy the full error message to the clipboard").clicked() {
+                                    ui.ctx().copy_text(err_text.clone());
+                                }
                                 if ui.button("Reconnect").clicked() {
                                     actions.push(Action::Reconnect(session.id()));
                                 }
