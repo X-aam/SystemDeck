@@ -5,6 +5,15 @@
 const ROLES = { Read: "Read only", Write: "Read & write", Manage: "Manage" };
 const KIND_COLORS = { Rdp: "#4084ee", Ssh: "#2eb078", Vnc: "#9662de", Telnet: "#e88e34", Serial: "#aa7650", Web: "#20a4be", RemoteSupport: "#dc4878", Credential: "#d6a824", Note: "#808894" };
 const KIND_BADGE = { Rdp: "RDP", Ssh: "SSH", Vnc: "VNC", Telnet: "TEL", Serial: "COM", Web: "WEB", RemoteSupport: "SUP", Credential: "KEY", Note: "TXT" };
+const KIND_LABELS = { Rdp: "Remote Desktop (RDP)", Ssh: "SSH", Vnc: "VNC", Telnet: "Telnet", Serial: "Serial console", Web: "Website", RemoteSupport: "Remote support (RustDesk)", Credential: "Credential", Note: "Secure note" };
+const DISPLAY_LABELS = { Default: "Default", Embedded: "Embedded (tab)", External: "External program" };
+const DEPTH_LABELS = { Bits16: "High colour (16-bit)", Bits24: "True colour (24-bit)", Bits32: "Highest quality (32-bit)" };
+const QUALITY_LABELS = { Best: "Best quality (LAN)", Balanced: "Balanced", Fast: "Fast (slow connection)" };
+const SCALING_LABELS = { Fit: "Shrink to fit", Stretch: "Stretch to fill", Actual: "Actual size (1:1)" };
+const RES_PRESETS = ["1280x720", "1366x768", "1600x900", "1920x1080", "2560x1440", "3840x2160"];
+const HAS_HOST = ["Rdp", "Ssh", "Vnc", "Telnet", "Serial"];
+const CAN_EMBED = ["Rdp", "Ssh", "Vnc"];
+const DEFAULT_PORTS = { Rdp: 3389, Ssh: 22, Vnc: 5900, Telnet: 23 };
 
 const state = { token: null, me: null, view: "overview", users: [], teams: [], vaults: [], stats: null, recordings: [], downloads: [] };
 
@@ -36,10 +45,14 @@ function h(tag, attrs, ...children) {
   return el;
 }
 
-function store(key, value) {
+// Reads check the tab first, then the browser. Writes clear both, then save to
+// localStorage when `persist` ("Remember me") so it survives closing the browser.
+function store(key, value, persist = false) {
   try {
-    if (value === undefined) return sessionStorage.getItem(key);
-    if (value === null) sessionStorage.removeItem(key); else sessionStorage.setItem(key, value);
+    if (value === undefined) return sessionStorage.getItem(key) ?? localStorage.getItem(key);
+    sessionStorage.removeItem(key);
+    localStorage.removeItem(key);
+    if (value !== null) (persist ? localStorage : sessionStorage).setItem(key, value);
   } catch (_) { return null; }
 }
 
@@ -516,10 +529,12 @@ function editAccess(v) {
   });
 }
 
+// Inline entries list for a vault (no modal).
 async function showEntries(v) {
   let entries;
   try { entries = await api("GET", `/api/admin/vaults/${v.id}/entries`); } catch (e) { toast(e.message, true); return; }
-  const recordable = (e) => e.kind === "Ssh" || e.kind === "Rdp" || e.kind === "Vnc";
+  setHeader(v.name, `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`, h("button", { class: "small", onclick: renderVaults }, "← Back to vaults"));
+  const recordable = (e) => CAN_EMBED.includes(e.kind);
   // Entry-level recording switch; the vault policy overrides it.
   const recSwitch = (e) => {
     if (!recordable(e)) return h("span", {});
@@ -551,8 +566,7 @@ async function showEntries(v) {
   const hint = v.record_ssh
     ? "Every SSH/RDP/VNC session in this vault is recorded (vault Settings)."
     : "Record: record that entry's SSH/RDP/VNC sessions. Or record the whole vault in Settings.";
-  modal(`${v.name}: ${entries.length} entries`, h("div", {}, body, h("p", { class: "muted", style: "margin-top:12px" }, `${hint} Edit opens the full entry, including its password.`)), "Close", async () => {}, { wide: true });
-  $("modal-cancel").classList.add("hidden");
+  $("view").replaceChildren(h("div", { class: "card" }, body, h("p", { class: "muted", style: "margin-top:12px" }, `${hint} Edit opens the full entry editor, including its password.`)));
 }
 
 async function dupEntry(v, e) {
@@ -567,44 +581,101 @@ async function dupEntry(v, e) {
 async function editEntry(v, summary) {
   let e;
   try { e = await api("GET", `/api/admin/vaults/${v.id}/entries/${summary.id}`); } catch (err) { toast(err.message, true); return; }
-  const f = {
-    name: h("input", { value: e.name || "" }),
-    group: h("input", { value: e.group || "" }),
-    host: h("input", { value: e.host || "" }),
-    port: h("input", { type: "number", value: e.port != null ? String(e.port) : "" }),
-    username: h("input", { value: e.username || "" }),
-    password: h("input", { type: "password", value: e.password || "" }),
-    domain: h("input", { value: e.domain || "" }),
-    url: h("input", { value: e.url || "" }),
-    notes: h("textarea", { rows: "3" }, e.notes || ""),
-  };
-  const reveal = h("button", { class: "small", type: "button" }, "Show");
-  reveal.addEventListener("click", () => {
-    const hidden = f.password.type === "password";
-    f.password.type = hidden ? "text" : "password";
-    reveal.textContent = hidden ? "Hide" : "Show";
+  renderEntryEditor(v, e);
+}
+
+// Full, inline entry editor (every field). Re-renders on type change so only
+// the relevant fields show; edits write straight into the working copy `e`.
+function renderEntryEditor(v, e) {
+  if (!e.screen) e.screen = {};
+  const k = e.kind;
+  setHeader("Edit entry", `${v.name} › ${e.name || "entry"}`, h("button", { class: "small", onclick: () => showEntries(v) }, "← Back to entries"));
+  const rows = [];
+  const add = (label, control) => rows.push(h("label", {}, label, control));
+  const txt = (key, ph) => { const el = h("input", { value: e[key] != null ? e[key] : "", placeholder: ph || "" }); el.addEventListener("input", () => (e[key] = el.value)); return el; };
+  const pick = (key, labels) => { const el = h("select", {}, ...Object.entries(labels).map(([val, lab]) => h("option", { value: val }, lab))); el.value = e[key]; el.addEventListener("change", () => { e[key] = el.value; if (key === "kind") renderEntryEditor(v, e); }); return el; };
+  const topCheck = (key, label) => { const b = h("input", { type: "checkbox" }); b.checked = !!e[key]; b.addEventListener("change", () => (e[key] = b.checked)); return h("label", { class: "check" }, b, label); };
+
+  add("Type", pick("kind", KIND_LABELS));
+  add("Name", txt("name", "required"));
+  add("Group", txt("group", "e.g. Servers/Production"));
+  if (k === "RemoteSupport") add("RustDesk ID", txt("host", "9-digit ID"));
+  else if (HAS_HOST.includes(k) || k === "Web") add("Host", txt("host", "hostname or IP"));
+  if (HAS_HOST.includes(k)) {
+    const el = h("input", { type: "number", value: e.port != null ? String(e.port) : "", placeholder: DEFAULT_PORTS[k] ? `default ${DEFAULT_PORTS[k]}` : "" });
+    el.addEventListener("input", () => (e.port = el.value ? Number(el.value) : null));
+    add("Port", el);
+  }
+  if (k === "Web") add("URL", txt("url", "https://..."));
+  if (k !== "Note") {
+    if (k === "Rdp" || k === "Credential") add("Domain", txt("domain"));
+    if (k !== "RemoteSupport") add("Username", txt("username"));
+    const pwd = h("input", { type: "password", value: e.password || "" });
+    pwd.addEventListener("input", () => (e.password = pwd.value));
+    const reveal = h("button", { class: "small", type: "button" }, "Show");
+    reveal.addEventListener("click", () => { const hid = pwd.type === "password"; pwd.type = hid ? "text" : "password"; reveal.textContent = hid ? "Hide" : "Show"; });
+    add(k === "RemoteSupport" ? "Password (unattended)" : "Password", h("div", { class: "row-actions" }, pwd, reveal));
+  }
+  if (CAN_EMBED.includes(k) || k === "Web") add("Open in", pick("display", DISPLAY_LABELS));
+  if (k === "Rdp" || k === "Vnc") {
+    if (k === "Rdp") {
+      add("Resolution", resolutionControl(v, e));
+      add("Colours", screenPick(e, "color_depth", DEPTH_LABELS));
+      add("Quality", screenPick(e, "quality", QUALITY_LABELS));
+    }
+    add("Scaling", screenPick(e, "scaling", SCALING_LABELS));
+    const extras = [screenCheck(e, "smooth", "Smooth scaling")];
+    if (k === "Rdp") extras.push(screenCheck(e, "full_screen", "Full screen (external mstsc)"));
+    add("Display", h("div", { class: "row-actions" }, ...extras));
+  }
+  if (CAN_EMBED.includes(k) || k === "Web") add("Recording", topCheck("record_session", "Record this entry's sessions"));
+  const tags = h("input", { value: (e.tags || []).join(", "), placeholder: "comma separated" });
+  tags.addEventListener("input", () => (e.tags = tags.value.split(",").map((t) => t.trim()).filter(Boolean)));
+  add("Tags", tags);
+  const notes = h("textarea", { rows: "4" }, e.notes || "");
+  notes.addEventListener("input", () => (e.notes = notes.value));
+  add("Notes", notes);
+
+  const save = h("button", { class: "primary", onclick: async () => {
+    if (!(e.name || "").trim()) { toast("Name is required", true); return; }
+    try { await api("PUT", `/api/admin/vaults/${v.id}/entries/${e.id}`, e); toast("Entry saved"); await loadAll(); showEntries(v); } catch (err) { toast(err.message, true); }
+  } }, "Save entry");
+  const cancel = h("button", { class: "small", onclick: () => showEntries(v) }, "Cancel");
+  $("view").replaceChildren(h("div", { class: "card", style: "max-width:720px" }, ...rows, h("div", { style: "margin-top:16px; display:flex; gap:10px" }, save, cancel)));
+}
+
+function screenPick(e, key, labels) {
+  const el = h("select", {}, ...Object.entries(labels).map(([val, lab]) => h("option", { value: val }, lab)));
+  el.value = e.screen[key];
+  el.addEventListener("change", () => (e.screen[key] = el.value));
+  return el;
+}
+function screenCheck(e, key, label) {
+  const b = h("input", { type: "checkbox" });
+  b.checked = !!e.screen[key];
+  b.addEventListener("change", () => (e.screen[key] = b.checked));
+  return h("label", { class: "check" }, b, label);
+}
+function resolutionControl(v, e) {
+  const fixed = e.screen.resolution && typeof e.screen.resolution === "object" && Array.isArray(e.screen.resolution.Fixed) ? e.screen.resolution.Fixed : null;
+  const presetStr = fixed ? `${fixed[0]}x${fixed[1]}` : null;
+  const sel = h("select", {}, h("option", { value: "fit" }, "Fit to window"),
+    ...RES_PRESETS.map((p) => h("option", { value: p }, p.replace("x", " × "))), h("option", { value: "custom" }, "Custom"));
+  sel.value = !fixed ? "fit" : (RES_PRESETS.includes(presetStr) ? presetStr : "custom");
+  const w = h("input", { type: "number", value: fixed ? fixed[0] : 1024 }); w.style.width = "90px";
+  const hgt = h("input", { type: "number", value: fixed ? fixed[1] : 768 }); hgt.style.width = "90px";
+  const applyCustom = () => (e.screen.resolution = { Fixed: [Number(w.value) || 1024, Number(hgt.value) || 768] });
+  w.addEventListener("input", applyCustom);
+  hgt.addEventListener("input", applyCustom);
+  sel.addEventListener("change", () => {
+    if (sel.value === "fit") e.screen.resolution = "Fit";
+    else if (sel.value === "custom") applyCustom();
+    else { const [a, b] = sel.value.split("x").map(Number); e.screen.resolution = { Fixed: [a, b] }; }
+    renderEntryEditor(v, e);
   });
-  modal(`Edit: ${e.name}`, h("div", {},
-    h("label", {}, "Name", f.name),
-    h("label", {}, "Group", f.group),
-    h("label", {}, "Host", f.host),
-    h("label", {}, "Port", f.port),
-    h("label", {}, "Username", f.username),
-    h("label", {}, "Password", h("div", { class: "row-actions" }, f.password, reveal)),
-    h("label", {}, "Domain", f.domain),
-    h("label", {}, "URL", f.url),
-    h("label", {}, "Notes", f.notes)), "Save", async () => {
-    const updated = Object.assign({}, e, {
-      name: f.name.value, group: f.group.value, host: f.host.value,
-      port: f.port.value ? Number(f.port.value) : null,
-      username: f.username.value, password: f.password.value,
-      domain: f.domain.value, url: f.url.value, notes: f.notes.value,
-    });
-    await api("PUT", `/api/admin/vaults/${v.id}/entries/${e.id}`, updated);
-    toast("Entry saved");
-    await loadAll();
-    showEntries(v);
-  });
+  const wrap = h("div", { class: "row-actions" }, sel);
+  if (sel.value === "custom") wrap.append(w, hgt);
+  return wrap;
 }
 
 // ---------- recordings ----------
@@ -1233,8 +1304,10 @@ document.addEventListener("DOMContentLoaded", () => {
     if (btn) btn.disabled = true;
     try {
       const resp = await api("POST", "/api/login", { username: $("login-user").value, password: $("login-pass").value });
+      const remember = $("login-remember").checked;
+      prefs("vd-remember", remember ? "1" : "0");
       state.token = resp.token;
-      store("vd-token", resp.token);
+      store("vd-token", resp.token, remember);
       $("login-pass").value = "";
       await start();
     } catch (err) {
@@ -1244,6 +1317,7 @@ document.addEventListener("DOMContentLoaded", () => {
     }
   });
 
+  $("login-remember").checked = prefs("vd-remember") !== "0";
   state.token = store("vd-token");
   if (state.token) start(); else showLogin();
 });
