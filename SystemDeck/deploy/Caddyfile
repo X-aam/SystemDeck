@@ -1,0 +1,20 @@
+# HTTPS for SystemDeck using Caddy's own internal CA (works for a bare IP or an
+# internal hostname, no public domain needed). Clients must trust the CA root:
+#   docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt systemdeck-ca.crt
+# then on Windows:  certutil -user -addstore Root systemdeck-ca.crt
+{
+	# Clients connecting by IP send no SNI; serve the SystemDeck certificate anyway.
+	default_sni {$SYSTEMDECK_HOST}
+	# Don't try to install the CA into the container's own trust store.
+	skip_install_trust
+}
+
+https://{$SYSTEMDECK_HOST} {
+	tls internal
+	reverse_proxy systemdeck:8740
+}
+
+# Plain HTTP only redirects to HTTPS.
+http:// {
+	redir https://{host}{uri} permanent
+}

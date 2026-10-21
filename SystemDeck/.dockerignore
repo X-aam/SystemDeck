@@ -1,0 +1,10 @@
+target/
+release/
+**/data/
+*.key
+*.redb
+*.sdrec
+*.sdweb
+deploy/
+docs/
+.git/

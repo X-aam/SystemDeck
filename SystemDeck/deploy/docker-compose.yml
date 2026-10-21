@@ -1,0 +1,41 @@
+# SystemDeck server behind Caddy (HTTPS). Deployed by deploy/deploy.py, which puts
+# this file, the Caddyfile and the source (./src) into one folder on the host.
+#
+#   .env              SYSTEMDECK_HOST=<address clients use, e.g. 192.168.1.10>
+#   ./data            database + server.key   (back this up; never delete)
+#   ./downloads       client installer/zip offered on the dashboard
+#
+# First start prints the admin password:  docker compose logs systemdeck
+name: systemdeck
+
+services:
+  systemdeck:
+    build: ./src
+    image: systemdeck-server:latest
+    restart: unless-stopped
+    environment:
+      RUST_LOG: info
+    volumes:
+      - ./data:/data
+      - ./downloads:/downloads:ro
+    expose:
+      - "8740"
+
+  caddy:
+    image: caddy:2
+    restart: unless-stopped
+    depends_on:
+      - systemdeck
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      SYSTEMDECK_HOST: ${SYSTEMDECK_HOST:?set SYSTEMDECK_HOST in .env}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+
+volumes:
+  caddy-data:
+  caddy-config:
