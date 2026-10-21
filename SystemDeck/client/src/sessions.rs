@@ -313,6 +313,10 @@ impl Session {
             .with_desktop_width(size.0)
             .with_desktop_height(size.1)
             .with_color_depth(depth)
+            // Advertise no RemoteFX: IronRDP's RemoteFX decoder fails on some servers'
+            // surface commands ("Fast-Path custom error" at session teardown). Without it
+            // the server falls back to standard bitmap updates, which decode reliably.
+            .with_codecs(vec!["remotefx:off".to_string()])
             .with_compression(screen.quality != Quality::Best);
         if !entry.domain.trim().is_empty() {
             builder = builder.with_domain(entry.domain.trim());
