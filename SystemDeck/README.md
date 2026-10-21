@@ -146,7 +146,9 @@ reach it over the network.
   *Open RDP/VNC in tabs* sets the default. "Open externally" uses mstsc / vncviewer.
 - External mstsc gets the password through a temporary `TERMSRV/<host>` Windows credential.
   The credential is removed after mstsc exits, and only if SystemDeck created it.
-- Embedded-session limitations (first version): no clipboard sync or drive/audio redirection.
+- Embedded RDP shares the clipboard both ways: text, images and files (copy files in
+  Explorer and paste them in the session, or copy on the server and paste on your PC).
+  Not yet supported: drive and audio redirection.
   No RD Gateway. Server certificates are not validated. Local cursor shape only.
 
 ### Offline-first sync

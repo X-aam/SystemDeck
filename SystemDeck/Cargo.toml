@@ -22,10 +22,14 @@ chacha20poly1305 = "0.10"
 redb = "2"
 hex = "0.4"
 
-# Patched IronRDP: tolerate undecodable Fast-Path pointer (cursor) updates instead
-# of dropping the whole RDP session. See vendor/ironrdp-session/src/fast_path.rs.
+# Patched IronRDP (look for "SystemDeck patch" comments):
+# - ironrdp-session: tolerate undecodable Fast-Path pointer (cursor) updates instead of
+#   dropping the whole RDP session (src/fast_path.rs).
+# - ironrdp-cliprdr-native: copy files from this PC and paste them in the remote session
+#   (src/windows/clipboard_impl.rs, cliprdr_backend.rs, mod.rs).
 [patch.crates-io]
 ironrdp-session = { path = "vendor/ironrdp-session" }
+ironrdp-cliprdr-native = { path = "vendor/ironrdp-cliprdr-native" }
 
 [profile.release]
 opt-level = 3

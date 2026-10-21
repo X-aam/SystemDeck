@@ -3,6 +3,16 @@
 ## Unreleased
 
 ### Desktop client
+- **Embedded RDP works on more servers**: fixed sessions dropping right after logon
+  ("Fast-Path … not enough bytes"). Bulk compression is now off, and an undecodable
+  cursor update is skipped instead of ending the session.
+- **RDP clipboard, both ways**: copy and paste text, images and files between your PC and
+  the RDP session. Files copied in Explorer paste in the session (folders included);
+  files copied on the server paste on your PC (downloaded on paste, so very large files
+  take a moment).
+- **Copy error** button on a failed or closed session, and the full error cause is shown.
+- **Log file** at `%LOCALAPPDATA%\SystemDeck\client.log` (recreated each start) to help
+  diagnose connection and clipboard problems.
 - **Website tabs now have full navigation**: Back, Forward, Reload (reloads the
   current page) and Home (returns to the entry's start page). Navigation stays in
   the tab, so recording keeps running across it.

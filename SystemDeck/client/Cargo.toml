@@ -22,10 +22,11 @@ eframe = "0.31"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "native-tls"] }
 keyring = { version = "3", features = ["windows-native"] }
 dirs = "6"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 open = "5"
 csv = "1"
 # Embedded sessions
-ironrdp-client = { version = "0.1", features = ["native-tls"] }
+ironrdp-client = { version = "0.1", features = ["native-tls", "clipboard"] }
 ironrdp-input = "*"
 ironrdp-pdu = "0.9"
 vnc-rs = "0.6"

@@ -18,7 +18,28 @@ mod theme;
 
 use eframe::egui;
 
+/// IronRDP and the session code log through `tracing`. Keep warnings (plus clipboard
+/// details) in `%LOCALAPPDATA%\SystemDeck\client.log`, recreated on each start, so
+/// connection and copy/paste problems can be diagnosed. `SYSTEMDECK_LOG` overrides the filter.
+fn init_logging() {
+    let base = std::env::var_os("SYSTEMDECK_HOME")
+        .map(std::path::PathBuf::from)
+        .or_else(|| dirs::data_local_dir().map(|d| d.join("SystemDeck")));
+    let Some(dir) = base else { return };
+    let _ = std::fs::create_dir_all(&dir);
+    let Ok(file) = std::fs::File::create(dir.join("client.log")) else { return };
+    let filter = tracing_subscriber::EnvFilter::try_from_env("SYSTEMDECK_LOG")
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn,ironrdp_cliprdr=debug,ironrdp_cliprdr_native=debug"));
+    let _ = tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .with_writer(std::sync::Mutex::new(file))
+        .try_init();
+}
+
 fn main() -> eframe::Result<()> {
+    init_logging();
+
     // WebView2 keeps its browser profile next to the exe by default, which is
     // read-only once installed under Program Files. Keep it per user instead.
     if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
