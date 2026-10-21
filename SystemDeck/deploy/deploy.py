@@ -27,7 +27,7 @@ import time
 import paramiko
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # the SystemDeck workspace
-SOURCES = ["Cargo.toml", "Cargo.lock", "Dockerfile", ".dockerignore", "shared", "server", "client"]
+SOURCES = ["Cargo.toml", "Cargo.lock", "Dockerfile", ".dockerignore", "shared", "server", "client", "vendor"]
 SKIP_DIRS = {"target", "data", ".git", "release"}
 SKIP_EXT = (".key", ".redb", ".sdrec", ".sdweb")
 
