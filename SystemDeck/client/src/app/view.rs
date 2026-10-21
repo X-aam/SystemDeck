@@ -132,7 +132,8 @@ impl App {
                             }
                             for le in entries {
                                 let picked = self.select_mode.then(|| self.picked.contains(&le.entry.id));
-                                entry_row(ui, le, self.selected == Some(le.entry.id), live.contains(&le.entry.id), picked, actions);
+                                let writable = self.entry_writable(le.entry.id);
+                                entry_row(ui, le, self.selected == Some(le.entry.id), live.contains(&le.entry.id), picked, writable, actions);
                             }
                         }
                     }
@@ -783,6 +784,9 @@ impl App {
                                     actions.push(Action::CopyPassword(id));
                                 }
                                 ui.separator();
+                                if ui.add_enabled(writable, egui::Button::new("Duplicate entry").frame(false)).clicked() {
+                                    actions.push(Action::Duplicate(id));
+                                }
                                 if ui.add_enabled(writable, egui::Button::new(RichText::new("Delete...").color(theme::DANGER)).frame(false)).clicked() {
                                     actions.push(Action::AskDelete(id));
                                 }
@@ -1112,7 +1116,7 @@ fn group_header(ui: &mut egui::Ui, label: &str, count: usize, collapsed: bool) -
 }
 
 /// `picked`: Some(..) in selection mode (row shows a check circle instead of the avatar).
-fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, picked: Option<bool>, actions: &mut Vec<Action>) {
+fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, picked: Option<bool>, writable: bool, actions: &mut Vec<Action>) {
     let e = &le.entry;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 60.0), Sense::click());
     let painter = ui.painter_at(rect);
@@ -1179,6 +1183,31 @@ fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, pic
     }
     if resp.double_clicked() && picked.is_none() {
         actions.push(Action::Launch(e.id));
+    }
+    if picked.is_none() {
+        resp.context_menu(|ui| {
+            if ui.button("Open").clicked() {
+                actions.push(Action::Launch(e.id));
+                ui.close_menu();
+            }
+            if ui.add_enabled(writable, egui::Button::new("Duplicate")).clicked() {
+                actions.push(Action::Duplicate(e.id));
+                ui.close_menu();
+            }
+            if ui.button("Copy username").clicked() {
+                actions.push(Action::CopyUser(e.id));
+                ui.close_menu();
+            }
+            if ui.button("Copy password").clicked() {
+                actions.push(Action::CopyPassword(e.id));
+                ui.close_menu();
+            }
+            ui.separator();
+            if ui.add_enabled(writable, egui::Button::new(RichText::new("Delete...").color(theme::DANGER))).clicked() {
+                actions.push(Action::AskDelete(e.id));
+                ui.close_menu();
+            }
+        });
     }
 }
 

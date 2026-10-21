@@ -28,6 +28,10 @@ pub const LOCAL_VAULT: Uuid = Uuid::nil();
 const KEYRING_SERVICE: &str = "SystemDeck";
 const KEYRING_USER: &str = "local-store-key";
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Serialize, Deserialize, Clone, Default)]
 #[serde(default)]
 pub struct Settings {
@@ -35,6 +39,10 @@ pub struct Settings {
     pub username: String,
     pub display_name: String,
     pub token: Option<String>,
+    /// Keep the sign-in saved across restarts. Defaults on, so an existing
+    /// saved token keeps working after upgrade.
+    #[serde(default = "default_true")]
+    pub remember_me: bool,
     pub is_admin: bool,
     /// Open RDP/VNC in an external program instead of a tab.
     pub external_by_default: bool,

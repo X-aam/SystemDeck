@@ -53,6 +53,8 @@ enum Action {
     CopyUser(Uuid),
     CopyPassword(Uuid),
     CopyTo { id: Uuid, target: Uuid, remove_source: bool },
+    /// Copy an entry within its own vault (new id, name + " (copy)").
+    Duplicate(Uuid),
     KeepMine(Uuid),
     UseServer(Uuid),
     SyncNow,
@@ -158,6 +160,7 @@ struct LoginForm {
     url: String,
     username: String,
     password: String,
+    remember: bool,
     error: Option<String>,
 }
 
@@ -441,7 +444,12 @@ impl App {
     }
 
     fn save_settings(&mut self) {
-        let settings = self.settings.clone();
+        let mut settings = self.settings.clone();
+        // "Remember me" off: keep the token for this run, but don't write it to
+        // disk, so the next launch starts signed out.
+        if !self.settings.remember_me {
+            settings.token = None;
+        }
         let saved = self.store.save_settings(&settings);
         self.check(saved);
         self.api = Api::new(&self.settings.server_url, self.settings.token.clone());
@@ -711,6 +719,7 @@ impl App {
                 }
             }
             Action::CopyTo { id, target, remove_source } => self.copy_to(ctx, id, target, remove_source),
+            Action::Duplicate(id) => self.duplicate_entry(ctx, id),
             Action::KeepMine(id) => {
                 if let Some(Some(mut le)) = self.check(self.store.entry(self.vault_of(id), id)) {
                     if let Some(server) = le.conflict.take() {
@@ -751,6 +760,7 @@ impl App {
                     url: if self.settings.server_url.is_empty() { "http://localhost:8740".into() } else { self.settings.server_url.clone() },
                     username: self.settings.username.clone(),
                     password: String::new(),
+                    remember: self.settings.token.is_none() || self.settings.remember_me,
                     error: None,
                 });
             }
@@ -1112,6 +1122,39 @@ impl App {
         }
     }
 
+    /// Makes a copy of an entry in its own vault, selects it, and syncs it up
+    /// if it lives in a server vault.
+    fn duplicate_entry(&mut self, ctx: &egui::Context, id: Uuid) {
+        let Some(source) = self.entry(id).cloned() else { return };
+        let vault = source.entry.vault_id;
+        let entry = Entry {
+            id: Uuid::new_v4(),
+            vault_id: vault,
+            revision: 0,
+            name: format!("{} (copy)", source.entry.name),
+            updated_at: Utc::now(),
+            updated_by: self.who(),
+            ..source.entry.clone()
+        };
+        let (new_id, name) = (entry.id, entry.name.clone());
+        let saved = self.store.put_entry(&LocalEntry { entry, dirty: vault != LOCAL_VAULT, base_revision: 0, conflict: None });
+        if self.check(saved).is_none() {
+            return;
+        }
+        self.draft = None;
+        self.active_tab = None;
+        self.selected = Some(new_id);
+        self.reload();
+        if vault != LOCAL_VAULT && self.signed_in() {
+            self.set_status(format!("Duplicated as '{name}' — pushing to server..."));
+            self.start_sync(ctx);
+        } else if vault != LOCAL_VAULT {
+            self.set_status(format!("Duplicated as '{name}' — it will be pushed when you sign in"));
+        } else {
+            self.set_status(format!("Duplicated as '{name}'"));
+        }
+    }
+
     fn copy_to(&mut self, ctx: &egui::Context, id: Uuid, target: Uuid, remove_source: bool) {
         let Some(source) = self.entry(id).cloned() else { return };
         let target_name = self.vaults.iter().find(|v| v.id == target).map(|v| v.name.clone()).unwrap_or_default();
@@ -1170,6 +1213,9 @@ impl App {
                     }
                     ui.end_row();
                 });
+                ui.add_space(4.0);
+                ui.checkbox(&mut form.remember, "Remember me")
+                    .on_hover_text("Stay signed in on this PC after closing SystemDeck. Turn off on a shared computer.");
                 if let Some(err) = &form.error {
                     ui.colored_label(ERROR, err);
                 }
@@ -1196,9 +1242,10 @@ impl App {
             return;
         }
 
-        let (url, username, password) = (normalize_url(&form.url), form.username.trim().to_lowercase(), form.password.clone());
+        let (url, username, password, remember) = (normalize_url(&form.url), form.username.trim().to_lowercase(), form.password.clone(), form.remember);
         match Api::new(&url, None).login(&username, &password) {
             Ok(resp) => {
+                self.settings.remember_me = remember;
                 if !self.settings.server_url.is_empty() && self.settings.server_url != url {
                     // Different server: drop the old server's cached vaults.
                     for v in self.vaults.clone().into_iter().filter(|v| !v.is_local()) {
