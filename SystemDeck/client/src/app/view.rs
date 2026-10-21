@@ -1121,7 +1121,7 @@ fn nav_toggle(ui: &mut egui::Ui, collapsed: bool) -> egui::Response {
 }
 
 fn vault_header(ui: &mut egui::Ui, v: &CachedVault, count: usize, collapsed: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, if resp.hovered() { theme::row_hover() } else { theme::panel() });
     painter.hline(rect.x_range(), rect.bottom() - 0.5, Stroke::new(1.0_f32, theme::border()));
@@ -1135,7 +1135,7 @@ fn vault_header(ui: &mut egui::Ui, v: &CachedVault, count: usize, collapsed: boo
     let arrow = if collapsed { ">" } else { "v" };
     painter.text(rect.left_center() + egui::vec2(12.0, 0.0), egui::Align2::LEFT_CENTER, arrow, FontId::monospace(11.0), theme::text_weak());
     painter.circle_filled(rect.left_center() + egui::vec2(28.0, 0.0), 4.5, color);
-    painter.text(rect.left_center() + egui::vec2(40.0, 0.0), egui::Align2::LEFT_CENTER, &v.name, FontId::proportional(13.5), theme::text());
+    painter.text(rect.left_center() + egui::vec2(40.0, 0.0), egui::Align2::LEFT_CENTER, &v.name, FontId::proportional(12.5), theme::text());
     let kind = if v.is_local() { "this PC" } else { v.role.label() };
     painter.text(rect.right_center() - egui::vec2(40.0, 0.0), egui::Align2::RIGHT_CENTER, kind, FontId::proportional(11.0), theme::text_weak());
     pill(&painter, rect.right_center() - egui::vec2(10.0, 0.0), &count.to_string(), color, Color32::WHITE);
@@ -1143,7 +1143,7 @@ fn vault_header(ui: &mut egui::Ui, v: &CachedVault, count: usize, collapsed: boo
 }
 
 fn group_header(ui: &mut egui::Ui, label: &str, count: usize, collapsed: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 22.0), Sense::click());
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, if resp.hovered() { theme::row_hover() } else { theme::subtle() });
     let arrow = if collapsed { ">" } else { "v" };
@@ -1154,10 +1154,28 @@ fn group_header(ui: &mut egui::Ui, label: &str, count: usize, collapsed: bool) -
     resp
 }
 
+/// Height of one connection row in the side list.
+const ENTRY_ROW_HEIGHT: f32 = 38.0;
+
+/// Small rounded kind tag ("RDP", "SSH", ...) used in the compact connection list.
+fn kind_tag(painter: &egui::Painter, rect: egui::Rect, fill: Color32, text: &str) {
+    painter.rect_filled(rect, 4.0, fill);
+    painter.text(rect.center(), egui::Align2::CENTER_CENTER, text, FontId::monospace(9.5), Color32::WHITE);
+}
+
+/// A shorter variant of `pill` that fits the compact rows.
+fn small_pill(painter: &egui::Painter, right_center: egui::Pos2, text: &str, fill: Color32) {
+    let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(9.5), Color32::WHITE);
+    let size = egui::vec2(galley.size().x + 10.0, 14.0);
+    let rect = egui::Rect::from_min_size(right_center - egui::vec2(size.x, size.y / 2.0), size);
+    painter.rect_filled(rect, 7.0, fill);
+    painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+}
+
 /// `picked`: Some(..) in selection mode (row shows a check circle instead of the avatar).
 fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, picked: Option<bool>, writable: bool, actions: &mut Vec<Action>) {
     let e = &le.entry;
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 60.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), ENTRY_ROW_HEIGHT), Sense::click());
     let painter = ui.painter_at(rect);
     if picked == Some(true) || (picked.is_none() && selected) {
         painter.rect_filled(rect, 0.0, theme::row_selected());
@@ -1166,51 +1184,49 @@ fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, pic
         painter.rect_filled(rect, 0.0, theme::row_hover());
     }
     let cy = rect.center().y;
-    let avatar_center = egui::pos2(rect.min.x + 36.0, cy);
+    // Compact kind tag ("RDP", "SSH", ...) instead of a large round avatar.
+    let badge = egui::Rect::from_center_size(egui::pos2(rect.min.x + 26.0, cy), egui::vec2(32.0, 17.0));
     match picked {
         Some(true) => {
-            painter.circle_filled(avatar_center, 18.0, theme::ACCENT);
-            theme::paint_icon(&painter, egui::Rect::from_center_size(avatar_center, egui::vec2(18.0, 18.0)), Icon::Check, Color32::WHITE);
+            painter.rect_filled(badge, 4.0, theme::ACCENT);
+            theme::paint_icon(&painter, egui::Rect::from_center_size(badge.center(), egui::vec2(12.0, 12.0)), Icon::Check, Color32::WHITE);
         }
         Some(false) => {
-            avatar(&painter, avatar_center, 18.0, kind_color(e.kind).gamma_multiply(0.35), e.kind.badge());
-            painter.circle_stroke(avatar_center, 18.0, Stroke::new(1.5_f32, theme::text_weak()));
+            kind_tag(&painter, badge, kind_color(e.kind).gamma_multiply(0.35), e.kind.badge());
+            painter.rect_stroke(badge, 4.0, Stroke::new(1.0_f32, theme::text_weak()), egui::StrokeKind::Inside);
         }
-        None => avatar(&painter, avatar_center, 18.0, kind_color(e.kind), e.kind.badge()),
+        None => kind_tag(&painter, badge, kind_color(e.kind), e.kind.badge()),
     }
 
     // Right column: time + status pill
     let right = rect.max.x - 16.0;
     let local = e.updated_at.with_timezone(&Local);
     let when = if local.date_naive() == Local::now().date_naive() { local.format("%H:%M").to_string() } else { local.format("%d %b").to_string() };
-    painter.text(egui::pos2(right, cy - 10.0), egui::Align2::RIGHT_CENTER, when, FontId::proportional(10.5), theme::text_weak());
+    painter.text(egui::pos2(right, cy - 7.0), egui::Align2::RIGHT_CENTER, when, FontId::proportional(10.0), theme::text_weak());
     if le.conflict.is_some() {
-        pill(&painter, egui::pos2(right, cy + 10.0), "conflict", theme::DANGER, Color32::WHITE);
+        small_pill(&painter, egui::pos2(right, cy + 8.0), "conflict", theme::DANGER);
     } else if live {
-        pill(&painter, egui::pos2(right, cy + 10.0), "live", theme::ACCENT, Color32::WHITE);
+        small_pill(&painter, egui::pos2(right, cy + 8.0), "live", theme::ACCENT);
     } else if le.dirty {
-        painter.circle_filled(egui::pos2(right - 4.0, cy + 10.0), 4.0, theme::WARN);
+        painter.circle_filled(egui::pos2(right - 4.0, cy + 8.0), 3.5, theme::WARN);
     }
 
     // Name + subtitle, clipped before the right column
-    let text_left = rect.min.x + 64.0;
+    let text_left = rect.min.x + 50.0;
     let clip = egui::Rect::from_min_max(egui::pos2(text_left, rect.min.y), egui::pos2(right - 52.0, rect.max.y));
     let p = painter.with_clip_rect(clip);
-    p.text(egui::pos2(text_left, cy - 9.0), egui::Align2::LEFT_CENTER, &e.name, FontId::proportional(13.5), theme::text());
+    p.text(egui::pos2(text_left, cy - 7.0), egui::Align2::LEFT_CENTER, &e.name, FontId::proportional(12.5), theme::text());
     let mut sub = e.host.clone();
     if let Some(port) = e.port {
         if !sub.is_empty() && Some(port) != e.kind.default_port() {
             sub += &format!(":{port}");
         }
     }
-    if !e.username.is_empty() {
-        sub = if sub.is_empty() { e.username.clone() } else { format!("{} · {sub}", e.username) };
-    }
     if sub.is_empty() {
         sub = e.kind.label().to_string();
     }
-    p.text(egui::pos2(text_left, cy + 10.0), egui::Align2::LEFT_CENTER, sub, FontId::proportional(12.0), theme::text_weak());
-    painter.hline(egui::Rangef::new(rect.min.x + 64.0, rect.max.x), rect.max.y - 0.5, Stroke::new(1.0_f32, theme::border()));
+    p.text(egui::pos2(text_left, cy + 8.0), egui::Align2::LEFT_CENTER, sub, FontId::proportional(11.0), theme::text_weak());
+    painter.hline(egui::Rangef::new(text_left, rect.max.x), rect.max.y - 0.5, Stroke::new(1.0_f32, theme::border()));
 
     let ctrl = ui.input(|i| i.modifiers.command);
     if resp.clicked() {
