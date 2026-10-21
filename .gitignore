@@ -1,9 +1,8 @@
 # Rust build output
-vaultdesk/target/
 target/
 
 # Packaged release (binaries + live server data)
-vaultdesk/release/
+release/
 
 # Live server data and secrets — never commit
 **/data/
