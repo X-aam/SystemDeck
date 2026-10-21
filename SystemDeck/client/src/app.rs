@@ -55,6 +55,10 @@ enum Action {
     CopyTo { id: Uuid, target: Uuid, remove_source: bool },
     /// Copy an entry within its own vault (new id, name + " (copy)").
     Duplicate(Uuid),
+    /// Open a web entry in the external browser despite the not-recorded warning.
+    OpenExternalAnyway(Uuid),
+    /// Dismiss the external-browser warning dialog.
+    DismissExternalWarn,
     KeepMine(Uuid),
     UseServer(Uuid),
     SyncNow,
@@ -239,6 +243,9 @@ pub struct App {
     ai_models: Vec<AiModel>,
     ai_models_rx: Option<mpsc::Receiver<Vec<AiModel>>>,
     ai_loaded: bool,
+
+    /// Web entry awaiting the user's OK to open externally (not recorded).
+    confirm_external: Option<Uuid>,
 }
 
 impl App {
@@ -293,6 +300,7 @@ impl App {
             ai_models: Vec::new(),
             ai_models_rx: None,
             ai_loaded: false,
+            confirm_external: None,
         };
         app.reload();
         app
@@ -720,6 +728,8 @@ impl App {
             }
             Action::CopyTo { id, target, remove_source } => self.copy_to(ctx, id, target, remove_source),
             Action::Duplicate(id) => self.duplicate_entry(ctx, id),
+            Action::OpenExternalAnyway(id) => self.launch_external_web(id),
+            Action::DismissExternalWarn => self.confirm_external = None,
             Action::KeepMine(id) => {
                 if let Some(Some(mut le)) = self.check(self.store.entry(self.vault_of(id), id)) {
                     if let Some(server) = le.conflict.take() {
@@ -810,11 +820,18 @@ impl App {
             if in_tab {
                 return self.open_browser(ctx, id, force_new);
             }
-            match launch::launch(&entry) {
-                Ok(msg) => self.set_status(msg),
-                Err(e) => self.set_error(e),
+            // External browser can't be recorded by SystemDeck.
+            if self.vault_requires_recording(entry.vault_id) {
+                return self.set_error(
+                    "This vault requires web sessions to be recorded, so this site can only open in a SystemDeck tab (an external browser isn't recorded).",
+                );
             }
-            return;
+            if entry.record_session {
+                // Warn before opening: it won't be recorded externally.
+                self.confirm_external = Some(id);
+                return;
+            }
+            return self.launch_external_web(id);
         }
 
         // Recorded sessions always open in a tab: an external program can't be recorded.
@@ -859,6 +876,21 @@ impl App {
         match launch::launch(&entry) {
             Ok(msg) if entry.kind == EntryKind::Ssh && !entry.password.is_empty() => {
                 self.set_status(format!("{msg} - password copied to clipboard"))
+            }
+            Ok(msg) => self.set_status(msg),
+            Err(e) => self.set_error(e),
+        }
+    }
+
+    /// Opens a web entry in the external browser, noting it isn't recorded
+    /// when the entry asks to be recorded.
+    fn launch_external_web(&mut self, id: Uuid) {
+        self.confirm_external = None;
+        let Some(le) = self.entry(id) else { return };
+        let entry = le.entry.clone();
+        match launch::launch(&entry) {
+            Ok(msg) if entry.record_session => {
+                self.set_error(format!("{msg} — NOT recorded: external browsers can't be recorded. Open in a SystemDeck tab to record this site."))
             }
             Ok(msg) => self.set_status(msg),
             Err(e) => self.set_error(e),
@@ -1188,6 +1220,39 @@ impl App {
     }
 
     // ---- UI ----
+
+    /// Warns before opening a to-be-recorded web entry in the external browser,
+    /// where SystemDeck can't record it.
+    fn external_warn_window(&mut self, ctx: &egui::Context, actions: &mut Vec<Action>) {
+        let Some(id) = self.confirm_external else { return };
+        let name = self.entry(id).map(|e| e.entry.name.clone()).unwrap_or_default();
+        let mut open = true;
+        egui::Window::new("Open in external browser?")
+            .collapsible(false)
+            .resizable(false)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.set_max_width(380.0);
+                ui.label(format!("\"{name}\" is set to be recorded, but SystemDeck can't record your external browser."));
+                ui.add_space(4.0);
+                ui.label(RichText::new("Open it externally and this session will NOT be recorded.").color(WARN));
+                ui.add_space(12.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Open in a SystemDeck tab (recorded)").clicked() {
+                        actions.push(Action::DismissExternalWarn);
+                        actions.push(Action::LaunchEmbedded(id));
+                    }
+                    if ui.button(RichText::new("Open externally — not recorded").color(ERROR)).clicked() {
+                        actions.push(Action::DismissExternalWarn);
+                        actions.push(Action::OpenExternalAnyway(id));
+                    }
+                });
+            });
+        if !open {
+            self.confirm_external = None;
+        }
+    }
 
     fn login_window(&mut self, ctx: &egui::Context) {
         let Some(form) = &mut self.login else { return };
@@ -1556,6 +1621,7 @@ impl eframe::App for App {
         self.assistant_panel(ctx, &mut actions);
         self.content_panel(ctx, &mut actions);
         self.detached_windows(ctx, &mut actions);
+        self.external_warn_window(ctx, &mut actions);
         self.login_window(ctx);
         self.password_window(ctx);
         self.import_window(ctx);
