@@ -1,0 +1,19 @@
+# Single-file, no-install launcher for the desktop client (SystemDeck-Portable.exe).
+# Not a workspace member: it embeds the *built* client, so build.ps1 builds it
+# after the client has been packaged into release\SystemDeck-Client\.
+[package]
+name = "systemdeck-portable"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+
+[[bin]]
+name = "systemdeck-portable"
+path = "src/main.rs"
+
+[dependencies]
+
+[profile.release]
+opt-level = "z"
+strip = true
+lto = true

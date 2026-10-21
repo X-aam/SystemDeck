@@ -19,6 +19,17 @@ mod theme;
 use eframe::egui;
 
 fn main() -> eframe::Result<()> {
+    // WebView2 keeps its browser profile next to the exe by default, which is
+    // read-only once installed under Program Files. Keep it per user instead.
+    if std::env::var_os("WEBVIEW2_USER_DATA_FOLDER").is_none() {
+        let base = std::env::var_os("SYSTEMDECK_HOME")
+            .map(std::path::PathBuf::from)
+            .or_else(|| dirs::data_local_dir().map(|d| d.join("SystemDeck")));
+        if let Some(base) = base {
+            std::env::set_var("WEBVIEW2_USER_DATA_FOLDER", base.join("WebView2"));
+        }
+    }
+
     let store = match store::Store::open_default() {
         Ok(store) => store,
         Err(err) => {

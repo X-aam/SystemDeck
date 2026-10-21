@@ -1,6 +1,7 @@
 # SystemDeck (desktop client)
 
-Run `systemdeck.exe`. No installation is needed.
+Run `SystemDeck-Setup.exe` to install it (no admin rights needed; Start menu shortcut,
+uninstall from Settings > Apps), or run `systemdeck.exe` from this folder without installing.
 
 - Works offline with a private **Local (this PC)** vault.
 - Click your avatar → **Connect to server...** and enter the server address

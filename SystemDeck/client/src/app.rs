@@ -128,18 +128,28 @@ struct Draft {
     show_password: bool,
     /// Why the recording switch can't be changed here (None = free to change).
     record_locked: Option<&'static str>,
+    /// What the editor started with, to tell whether anything was changed.
+    pristine: (Entry, String, String),
 }
 
 impl Draft {
     fn new(entry: Entry, is_new: bool) -> Self {
+        let port = entry.port.map(|p| p.to_string()).unwrap_or_default();
+        let tags = entry.tags.join(", ");
         Self {
-            port: entry.port.map(|p| p.to_string()).unwrap_or_default(),
-            tags: entry.tags.join(", "),
+            pristine: (entry.clone(), port.clone(), tags.clone()),
+            port,
+            tags,
             entry,
             is_new,
             show_password: false,
             record_locked: None,
         }
+    }
+
+    fn is_modified(&self) -> bool {
+        let (entry, port, tags) = &self.pristine;
+        self.entry != *entry || self.port != *port || self.tags != *tags
     }
 
     fn build(&self) -> Result<Entry, String> {
@@ -188,6 +198,8 @@ pub struct App {
     selected: Option<Uuid>,
     draft: Option<Draft>,
     search: String,
+    /// Filter typed into the vault picker.
+    vault_search: String,
     reveal_password: bool,
     copy_target: Option<Uuid>,
     confirm_delete: Option<Uuid>,
@@ -266,6 +278,7 @@ impl App {
             selected: None,
             draft: None,
             search: String::new(),
+            vault_search: String::new(),
             reveal_password: false,
             copy_target: None,
             confirm_delete: None,
@@ -570,10 +583,19 @@ impl App {
                 self.reload();
             }
             Action::Select(id) => {
-                if self.draft.is_none() {
-                    self.active_tab = None;
+                // An open editor used to swallow list clicks silently - and it can be
+                // hidden behind a session tab, which made the list look dead.
+                if let Some(draft) = &self.draft {
+                    if draft.is_modified() {
+                        self.active_tab = None; // bring the editor back into view
+                        let name = if draft.entry.name.trim().is_empty() { "the new entry".to_string() } else { format!("'{}'", draft.entry.name.trim()) };
+                        self.set_error(format!("You have unsaved changes to {name} - Save or Cancel them first"));
+                        return;
+                    }
+                    self.draft = None;
                 }
-                if self.draft.is_none() && self.selected != Some(id) {
+                self.active_tab = None;
+                if self.selected != Some(id) {
                     self.selected = Some(id);
                     self.reveal_password = false;
                     self.confirm_delete = None;

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["shared", "server", "client"]
+# Built separately by build.ps1 after the client is packaged (it embeds the client).
+exclude = ["portable"]
 
 [workspace.package]
 version = "0.1.0"

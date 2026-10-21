@@ -1054,6 +1054,8 @@ pub struct BrowserSession {
     /// Current parent window HWND (main window, or a detached one).
     parent: isize,
     rec: Option<BrowserRec>,
+    /// Set while the "open externally while recording" warning is showing.
+    confirm_external: bool,
 }
 
 /// Records a browser session: a thread screenshots the WebView2 window about
@@ -1126,6 +1128,7 @@ impl BrowserSession {
             visible: true,
             parent: parent_hwnd,
             rec,
+            confirm_external: false,
         })
     }
 
@@ -1195,7 +1198,16 @@ impl SessionView for BrowserSession {
             ui.ctx().request_repaint_after(Duration::from_millis(300));
             ui.separator();
         }
-        if ui.button("Reload").clicked() {
+        if ui.button("\u{2190} Back").on_hover_text("Go back to the previous page").clicked() {
+            let _ = self.webview.evaluate_script("history.back()");
+        }
+        if ui.button("Forward \u{2192}").on_hover_text("Go forward to the next page").clicked() {
+            let _ = self.webview.evaluate_script("history.forward()");
+        }
+        if ui.button("Reload").on_hover_text("Reload the current page").clicked() {
+            let _ = self.webview.evaluate_script("location.reload()");
+        }
+        if ui.button("Home").on_hover_text("Return to the entry's start page").clicked() {
             let _ = self.webview.load_url(&self.url);
         }
         if !self.password.is_empty() {
@@ -1222,16 +1234,66 @@ impl SessionView for BrowserSession {
             {
                 let _ = self.webview.evaluate_script(&Self::type_script(&self.username));
             }
-            if ui.button("Copy password").clicked() {
-                ui.ctx().copy_text(self.password.clone());
-            }
+        }
+        ui.separator();
+        if !self.username.is_empty()
+            && ui.button("Copy username").on_hover_text("Copy the stored username to the clipboard").clicked()
+        {
+            ui.ctx().copy_text(self.username.clone());
+        }
+        if !self.password.is_empty()
+            && ui.button("Copy password").on_hover_text("Copy the stored password to the clipboard").clicked()
+        {
+            ui.ctx().copy_text(self.password.clone());
+        }
+        if ui.button("Copy login URL").on_hover_text("Copy this entry's login address to the clipboard").clicked() {
+            ui.ctx().copy_text(self.url.clone());
         }
         ui.separator();
         if ui.button("Open in browser").on_hover_text("Open this page in your default browser").clicked() {
-            let _ = open::that_detached(&self.url);
+            if self.rec.is_some() {
+                // Recording can't follow the page into an external browser - warn first.
+                self.confirm_external = true;
+            } else {
+                let _ = open::that_detached(&self.url);
+            }
         }
         ui.separator();
         ui.label(RichText::new(&self.url).weak().small());
+
+        if self.confirm_external {
+            let mut open_now = false;
+            egui::Window::new("Open outside SystemDeck?")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+                .show(ui.ctx(), |ui| {
+                    ui.set_max_width(420.0);
+                    ui.label(
+                        RichText::new("This session is being recorded.")
+                            .color(Color32::from_rgb(232, 84, 92))
+                            .strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.label(
+                        "Your default browser is outside SystemDeck, so anything you do there \
+                         will NOT be recorded. The SystemDeck tab keeps recording.",
+                    );
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        if ui.button("Open externally - not recorded").clicked() {
+                            open_now = true;
+                        }
+                        if ui.button("Stay in SystemDeck").clicked() {
+                            self.confirm_external = false;
+                        }
+                    });
+                });
+            if open_now {
+                let _ = open::that_detached(&self.url);
+                self.confirm_external = false;
+            }
+        }
     }
     fn set_visible(&mut self, visible: bool) {
         if visible != self.visible {
@@ -1250,8 +1312,15 @@ impl SessionView for BrowserSession {
     fn ui(&mut self, ui: &mut egui::Ui) {
         let rect = ui.available_rect_before_wrap();
         ui.allocate_rect(rect, Sense::hover());
-        self.set_visible(true);
-        self.place(rect, ui.ctx().pixels_per_point());
+        // The WebView2 child is a native window that paints over the egui
+        // surface, so it must be hidden while a warning dialog is showing or the
+        // dialog would be invisible and unclickable behind it.
+        if self.confirm_external {
+            self.set_visible(false);
+        } else {
+            self.set_visible(true);
+            self.place(rect, ui.ctx().pixels_per_point());
+        }
     }
     fn ai_context(&self) -> String {
         format!("Current page URL: {}", self.url)

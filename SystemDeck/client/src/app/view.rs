@@ -327,14 +327,31 @@ impl App {
                 .frame(false),
         );
         let popup_id = ui.make_persistent_id("vault_menu");
+        let mut just_opened = false;
         if resp.clicked() {
             ui.memory_mut(|m| m.toggle_popup(popup_id));
+            self.vault_search.clear();
+            just_opened = true;
         }
-        egui::popup::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClick, |ui| {
+        // Clicks inside the menu (e.g. into the search box) must not close it;
+        // picking a vault closes it explicitly.
+        let mut close = false;
+        egui::popup::popup_below_widget(ui, popup_id, &resp, egui::PopupCloseBehavior::CloseOnClickOutside, |ui| {
             ui.set_min_width(240.0);
+            let search = ui.add(
+                egui::TextEdit::singleline(&mut self.vault_search)
+                    .hint_text("Search vaults…")
+                    .desired_width(f32::INFINITY),
+            );
+            if just_opened {
+                search.request_focus();
+            }
+            let needle = self.vault_search.trim().to_lowercase();
+            let searching = !needle.is_empty();
+            ui.add_space(4.0);
             ui.label(RichText::new("VAULTS").color(theme::text_weak()).size(10.5).strong());
             // Everything at once: Local and every server vault in one list.
-            {
+            if !searching {
                 let total: usize = self.vault_counts.values().map(|(n, _)| n).sum();
                 let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
                 let painter = ui.painter();
@@ -348,10 +365,13 @@ impl App {
                 pill(painter, rect.right_center() - egui::vec2(8.0, 0.0), &total.to_string(), theme::ACCENT, Color32::WHITE);
                 if r.on_hover_text("Local and server vaults together in one list").clicked() {
                     actions.push(Action::SelectVault(ALL_VAULTS));
+                    close = true;
                 }
                 ui.separator();
             }
-            for v in &self.vaults {
+            let mut shown = 0;
+            for v in self.vaults.iter().filter(|v| !searching || v.name.to_lowercase().contains(&needle)) {
+                shown += 1;
                 let (count, attention) = self.vault_counts.get(&v.id).copied().unwrap_or((0, 0));
                 let (rect, r) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 30.0), Sense::click());
                 let painter = ui.painter();
@@ -374,12 +394,26 @@ impl App {
                 let r = if v.is_local() { r.on_hover_text("Private - stored only on this PC") } else { r.on_hover_text(format!("Your access: {}", v.role.label())) };
                 if r.clicked() {
                     actions.push(Action::SelectVault(v.id));
+                    close = true;
                 }
             }
-            if self.vaults.len() <= 1 {
+            if searching && shown == 0 {
+                ui.label(RichText::new("No vault matches").color(theme::text_weak()).size(11.5));
+            }
+            // Enter picks the only match.
+            if searching && shown == 1 && search.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                if let Some(v) = self.vaults.iter().find(|v| v.name.to_lowercase().contains(&needle)) {
+                    actions.push(Action::SelectVault(v.id));
+                    close = true;
+                }
+            }
+            if !searching && self.vaults.len() <= 1 {
                 ui.label(RichText::new("Connect to a server to see team vaults.").color(theme::text_weak()).size(11.5));
             }
         });
+        if close {
+            ui.memory_mut(|m| m.close_popup());
+        }
     }
 
     // ------------------------------------------------------------------
