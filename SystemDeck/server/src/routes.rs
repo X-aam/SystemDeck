@@ -13,11 +13,11 @@ use serde_json::{json, Value};
 use uuid::Uuid;
 use systemdeck_core::{
     api::*,
-    Principal, Role, Team, UserInfo, Vault, VaultSummary,
+    Capability, Principal, Role, SystemRole, Team, UserInfo, Vault, VaultSummary,
 };
 
 use crate::{
-    auth::{self, AdminUser, AuthUser},
+    auth::{self, AuthUser},
     error::{ApiError, ApiResult},
     store::{endpoint_label, Db, StoredUser},
     AppState,
@@ -211,7 +211,8 @@ async fn push(
 
 // ---- administration ----
 
-async fn admin_users(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<Vec<UserInfo>>> {
+async fn admin_users(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<Vec<UserInfo>>> {
+    auth.require(Capability::ManageUsers)?;
     let mut users: Vec<UserInfo> = st.db.users()?.iter().map(StoredUser::info).collect();
     users.sort_by(|a, b| a.username.cmp(&b.username));
     Ok(Json(users))
@@ -219,37 +220,43 @@ async fn admin_users(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Jso
 
 async fn admin_create_user(
     State(st): State<AppState>,
-    AdminUser(admin): AdminUser,
+    auth: AuthUser,
     Json(req): Json<CreateUserRequest>,
 ) -> ApiResult<Json<UserInfo>> {
+    auth.require(Capability::ManageUsers)?;
     let username = auth::validate_username(&req.username)?;
     auth::validate_password(&req.password)?;
     if st.db.user(&username)?.is_some() {
         return Err(ApiError::bad_request("a user with that name already exists"));
     }
+    let role = req.role.unwrap_or(if req.is_admin { SystemRole::Admin } else { SystemRole::User });
     let display_name = if req.display_name.trim().is_empty() { username.clone() } else { req.display_name.trim().to_string() };
     let user = StoredUser {
         username,
         display_name,
         password_hash: auth::hash_password(&req.password)?,
-        is_admin: req.is_admin,
+        role,
+        is_admin: role.is_admin(),
         disabled: false,
         created_at: Utc::now(),
     };
     st.db.put_user(&user)?;
-    st.db.audit(&admin.username, "user_create", &user.username, if user.is_admin { "administrator" } else { "" });
+    st.db.audit(&auth.user.username, "user_create", &user.username, role.label());
     Ok(Json(user.info()))
 }
 
 async fn admin_update_user(
     State(st): State<AppState>,
-    AdminUser(admin): AdminUser,
+    auth: AuthUser,
     Path(username): Path<String>,
     Json(req): Json<UpdateUserRequest>,
 ) -> ApiResult<Json<UserInfo>> {
+    auth.require(Capability::ManageUsers)?;
     let mut user = st.db.user(&username)?.ok_or_else(|| ApiError::not_found("user not found"))?;
-    let is_self = user.username == admin.username;
-    if is_self && (req.disabled == Some(true) || req.is_admin == Some(false)) {
+    let is_self = user.username == auth.user.username;
+    // New role from `role`, or the legacy `is_admin` flag.
+    let new_role = req.role.or_else(|| req.is_admin.map(|a| if a { SystemRole::Admin } else { SystemRole::User }));
+    if is_self && (req.disabled == Some(true) || new_role.is_some_and(|r| !r.is_admin())) {
         return Err(ApiError::bad_request("you cannot disable or demote your own account"));
     }
     let mut revoke_sessions = false;
@@ -261,8 +268,9 @@ async fn admin_update_user(
         user.password_hash = auth::hash_password(&password)?;
         revoke_sessions = !is_self;
     }
-    if let Some(is_admin) = req.is_admin {
-        user.is_admin = is_admin;
+    if let Some(role) = new_role {
+        user.role = role;
+        user.is_admin = role.is_admin();
     }
     if let Some(disabled) = req.disabled {
         user.disabled = disabled;
@@ -272,25 +280,26 @@ async fn admin_update_user(
     if revoke_sessions {
         st.db.delete_sessions_for(&user.username)?;
     }
-    st.db.audit(&admin.username, "user_update", &user.username, if user.disabled { "disabled" } else { "updated" });
+    st.db.audit(&auth.user.username, "user_update", &user.username, if user.disabled { "disabled" } else { user.role.label() });
     Ok(Json(user.info()))
 }
 
 async fn admin_revoke_sessions(
     State(st): State<AppState>,
-    AdminUser(admin): AdminUser,
+    auth: AuthUser,
     Path(username): Path<String>,
 ) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageUsers)?;
     let user = st.db.user(&username)?.ok_or_else(|| ApiError::not_found("user not found"))?;
-    if user.username == admin.username {
+    if user.username == auth.user.username {
         return Err(ApiError::bad_request("use Sign out to end your own session"));
     }
     st.db.delete_sessions_for(&user.username)?;
     if let Ok(mut seen) = st.last_seen.lock() {
         seen.remove(&user.username);
     }
-    tracing::info!(admin = %admin.username, user = %user.username, "sessions revoked");
-    st.db.audit(&admin.username, "sessions_revoked", &user.username, "signed the user out everywhere");
+    tracing::info!(admin = %auth.user.username, user = %user.username, "sessions revoked");
+    st.db.audit(&auth.user.username, "sessions_revoked", &user.username, "signed the user out everywhere");
     Ok(ok())
 }
 
@@ -304,7 +313,8 @@ struct AuditQuery {
     action: Option<String>,
 }
 
-async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<ServerConfig>> {
+async fn admin_get_config(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<ServerConfig>> {
+    auth.require(Capability::ManageConfig)?;
     let c = st.db.config()?;
     let endpoints = c.endpoints();
     let models = c.models();
@@ -321,7 +331,8 @@ async fn admin_get_config(State(st): State<AppState>, _a: AdminUser) -> ApiResul
     }))
 }
 
-async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<ServerConfigUpdate>) -> ApiResult<Json<ServerConfig>> {
+async fn admin_put_config(State(st): State<AppState>, auth: AuthUser, Json(req): Json<ServerConfigUpdate>) -> ApiResult<Json<ServerConfig>> {
+    auth.require(Capability::ManageConfig)?;
     let mut c = st.db.config()?;
     // Endpoints first: keys are write-only (a blank key keeps the stored one).
     if let Some(list) = req.ai_endpoints {
@@ -393,8 +404,8 @@ async fn admin_put_config(State(st): State<AppState>, AdminUser(admin): AdminUse
         c.audit_retention_days = v.max(0);
     }
     st.db.put_config(&c)?;
-    st.db.audit(&admin.username, "config_update", "server settings", &format!("{} endpoint(s), {} model(s)", c.ai_endpoints.len(), c.ai_models.len()));
-    admin_get_config(State(st), AdminUser(admin)).await
+    st.db.audit(&auth.user.username, "config_update", "server settings", &format!("{} endpoint(s), {} model(s)", c.ai_endpoints.len(), c.ai_models.len()));
+    admin_get_config(State(st), auth).await
 }
 
 #[derive(serde::Deserialize)]
@@ -425,7 +436,8 @@ impl TestAi {
 }
 
 /// Tests one model on an endpoint (body url/key, or a saved endpoint by id).
-async fn admin_test_ai(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
+async fn admin_test_ai(State(st): State<AppState>, auth: AuthUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageConfig)?;
     let (url, key) = req.endpoint(&st.db.config()?);
     let model = req.model.clone().filter(|s| !s.trim().is_empty());
     let ai = crate::ai::Ai::new(Some(url), model, Some(key)).ok_or_else(|| ApiError::bad_request("no endpoint URL to test"))?;
@@ -438,7 +450,8 @@ async fn admin_test_ai(State(st): State<AppState>, _a: AdminUser, Json(req): Jso
 /// Lists the models an endpoint serves, so an admin can add several from one
 /// URL without retyping it. Uses the body url/key, or a saved model by id, or
 /// the default model's endpoint.
-async fn admin_list_ai_models(State(st): State<AppState>, _a: AdminUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
+async fn admin_list_ai_models(State(st): State<AppState>, auth: AuthUser, Json(req): Json<TestAi>) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageConfig)?;
     let (url, key) = req.endpoint(&st.db.config()?);
     let ai = crate::ai::Ai::new(Some(url), None, Some(key)).ok_or_else(|| ApiError::bad_request("no endpoint URL"))?;
     match ai.list_models().await {
@@ -447,14 +460,16 @@ async fn admin_list_ai_models(State(st): State<AppState>, _a: AdminUser, Json(re
     }
 }
 
-async fn admin_audit(State(st): State<AppState>, _a: AdminUser, Query(q): Query<AuditQuery>) -> ApiResult<Json<Vec<AuditEvent>>> {
+async fn admin_audit(State(st): State<AppState>, auth: AuthUser, Query(q): Query<AuditQuery>) -> ApiResult<Json<Vec<AuditEvent>>> {
+    auth.require(Capability::ViewAudit)?;
     let limit = q.limit.unwrap_or(500).clamp(1, 5000);
     let user = q.user.as_deref().filter(|s| !s.is_empty());
     let action = q.action.as_deref().filter(|s| !s.is_empty());
     Ok(Json(st.db.audit_log(limit, user, action)?))
 }
 
-async fn admin_stats(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<ServerStats>> {
+async fn admin_stats(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<ServerStats>> {
+    auth.require(Capability::ViewStats)?;
     let users = st.db.users()?;
     let vaults = st.db.vaults()?;
     let sessions = st.db.active_sessions()?;
@@ -488,7 +503,8 @@ async fn admin_stats(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Jso
     }))
 }
 
-async fn admin_vault_entries(State(st): State<AppState>, _a: AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Vec<EntrySummary>>> {
+async fn admin_vault_entries(State(st): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> ApiResult<Json<Vec<EntrySummary>>> {
+    auth.require(Capability::ManageVaults)?;
     st.db.vault(id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
     let (entries, _) = st.db.entries_since(id, 0)?;
     let mut out: Vec<EntrySummary> = entries
@@ -514,10 +530,12 @@ async fn admin_vault_entries(State(st): State<AppState>, _a: AdminUser, Path(id)
 /// revision, so every client picks it up on its next sync.
 async fn admin_entry_recording(
     State(st): State<AppState>,
-    AdminUser(admin): AdminUser,
+    auth: AuthUser,
     Path((vault_id, entry_id)): Path<(Uuid, Uuid)>,
     Json(req): Json<Value>,
 ) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageVaults)?;
+    let admin = &auth.user;
     let record = req["record"].as_bool().ok_or_else(|| ApiError::bad_request("expected {\"record\": true|false}"))?;
     st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
     let (entries, _) = st.db.entries_since(vault_id, 0)?;
@@ -637,11 +655,14 @@ async fn recording_finish(State(st): State<AppState>, auth: AuthUser, Path(id): 
     Ok(ok())
 }
 
-async fn admin_recordings(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<Vec<RecordingMeta>>> {
+async fn admin_recordings(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<Vec<RecordingMeta>>> {
+    auth.require(Capability::ViewRecordings)?;
     Ok(Json(st.db.recordings()?))
 }
 
-async fn admin_recording_data(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<impl IntoResponse> {
+async fn admin_recording_data(State(st): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> ApiResult<impl IntoResponse> {
+    auth.require(Capability::ViewRecordings)?;
+    let admin = &auth.user;
     let meta = st.db.recording(id)?.ok_or_else(|| ApiError::not_found("recording not found"))?;
     let data = st.db.read_recording(id)?;
     tracing::info!(admin = %admin.username, recording = %id, "recording viewed");
@@ -658,7 +679,9 @@ async fn admin_recording_data(State(st): State<AppState>, AdminUser(admin): Admi
     ))
 }
 
-async fn admin_delete_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+async fn admin_delete_recording(State(st): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    auth.require(Capability::DeleteRecordings)?;
+    let admin = &auth.user;
     st.db.delete_recording(id)?;
     tracing::info!(admin = %admin.username, recording = %id, "recording deleted");
     st.db.audit(&admin.username, "recording_delete", &id.to_string(), "");
@@ -673,7 +696,9 @@ struct SummarizeQuery {
 }
 
 /// AI: summarise a recording and flag sensitive actions, caching the result.
-async fn admin_summarize_recording(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>, Query(q): Query<SummarizeQuery>) -> ApiResult<Json<RecordingMeta>> {
+async fn admin_summarize_recording(State(st): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>, Query(q): Query<SummarizeQuery>) -> ApiResult<Json<RecordingMeta>> {
+    auth.require(Capability::ViewRecordings)?;
+    let admin = &auth.user;
     let ai = st.ai(q.model.as_deref()).ok_or_else(|| ApiError::new(axum::http::StatusCode::SERVICE_UNAVAILABLE, "AI is not configured (add a model in Settings)"))?;
     let mut meta = st.db.recording(id)?.ok_or_else(|| ApiError::not_found("recording not found"))?;
     let data = st.db.read_recording(id)?;
@@ -862,13 +887,16 @@ fn clean_members(members: Vec<String>) -> Vec<String> {
     out
 }
 
-async fn admin_teams(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<Vec<Team>>> {
+async fn admin_teams(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<Vec<Team>>> {
+    auth.require(Capability::ManageTeams)?;
     let mut teams = st.db.teams()?;
     teams.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(Json(teams))
 }
 
-async fn admin_create_team(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<TeamRequest>) -> ApiResult<Json<Team>> {
+async fn admin_create_team(State(st): State<AppState>, auth: AuthUser, Json(req): Json<TeamRequest>) -> ApiResult<Json<Team>> {
+    auth.require(Capability::ManageTeams)?;
+    let admin = &auth.user;
     if req.name.trim().is_empty() {
         return Err(ApiError::bad_request("team name is required"));
     }
@@ -880,10 +908,12 @@ async fn admin_create_team(State(st): State<AppState>, AdminUser(admin): AdminUs
 
 async fn admin_update_team(
     State(st): State<AppState>,
-    AdminUser(admin): AdminUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<TeamRequest>,
 ) -> ApiResult<Json<Team>> {
+    auth.require(Capability::ManageTeams)?;
+    let admin = &auth.user;
     let mut team = st.db.team(id)?.ok_or_else(|| ApiError::not_found("team not found"))?;
     if !req.name.trim().is_empty() {
         team.name = req.name.trim().to_string();
@@ -894,20 +924,25 @@ async fn admin_update_team(
     Ok(Json(team))
 }
 
-async fn admin_delete_team(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+async fn admin_delete_team(State(st): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageTeams)?;
+    let admin = &auth.user;
     let name = st.db.team(id)?.map(|t| t.name).unwrap_or_default();
     st.db.delete_team(id)?;
     st.db.audit(&admin.username, "team_delete", &name, "");
     Ok(ok())
 }
 
-async fn admin_vaults(State(st): State<AppState>, _a: AdminUser) -> ApiResult<Json<Vec<Vault>>> {
+async fn admin_vaults(State(st): State<AppState>, auth: AuthUser) -> ApiResult<Json<Vec<Vault>>> {
+    auth.require(Capability::ManageVaults)?;
     let mut vaults = st.db.vaults()?;
     vaults.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
     Ok(Json(vaults))
 }
 
-async fn admin_create_vault(State(st): State<AppState>, AdminUser(admin): AdminUser, Json(req): Json<VaultRequest>) -> ApiResult<Json<Vault>> {
+async fn admin_create_vault(State(st): State<AppState>, auth: AuthUser, Json(req): Json<VaultRequest>) -> ApiResult<Json<Vault>> {
+    auth.require(Capability::ManageVaults)?;
+    let admin = &auth.user;
     if req.name.trim().is_empty() {
         return Err(ApiError::bad_request("vault name is required"));
     }
@@ -926,10 +961,12 @@ async fn admin_create_vault(State(st): State<AppState>, AdminUser(admin): AdminU
 
 async fn admin_update_vault(
     State(st): State<AppState>,
-    AdminUser(admin): AdminUser,
+    auth: AuthUser,
     Path(id): Path<Uuid>,
     Json(req): Json<VaultRequest>,
 ) -> ApiResult<Json<Vault>> {
+    auth.require(Capability::ManageVaults)?;
+    let admin = &auth.user;
     let mut vault = st.db.vault(id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
     if !req.name.trim().is_empty() {
         vault.name = req.name.trim().to_string();
@@ -944,7 +981,9 @@ async fn admin_update_vault(
     Ok(Json(vault))
 }
 
-async fn admin_delete_vault(State(st): State<AppState>, AdminUser(admin): AdminUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+async fn admin_delete_vault(State(st): State<AppState>, auth: AuthUser, Path(id): Path<Uuid>) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageVaults)?;
+    let admin = &auth.user;
     let name = st.db.vault(id)?.map(|v| v.name).unwrap_or_default();
     st.db.delete_vault(id)?;
     st.db.audit(&admin.username, "vault_delete", &name, "");

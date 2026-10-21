@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::model::{Entry, Grant, UserInfo};
+use crate::model::{Entry, Grant, SystemRole, UserInfo};
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ErrorBody {
@@ -73,6 +73,10 @@ pub struct CreateUserRequest {
     pub username: String,
     pub display_name: String,
     pub password: String,
+    /// Account role. Falls back to `is_admin` for older clients.
+    #[serde(default)]
+    pub role: Option<SystemRole>,
+    #[serde(default)]
     pub is_admin: bool,
 }
 
@@ -82,6 +86,8 @@ pub struct UpdateUserRequest {
     pub display_name: Option<String>,
     #[serde(default)]
     pub password: Option<String>,
+    #[serde(default)]
+    pub role: Option<SystemRole>,
     #[serde(default)]
     pub is_admin: Option<bool>,
     #[serde(default)]

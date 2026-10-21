@@ -16,7 +16,7 @@ use uuid::Uuid;
 use systemdeck_core::{
     api::{AuditEvent, PushResult, RecordingMeta},
     crypto::{self, Key},
-    Entry, Principal, Team, UserInfo, Vault,
+    Entry, Principal, SystemRole, Team, UserInfo, Vault,
 };
 
 type Tbl = TableDefinition<'static, &'static str, &'static [u8]>;
@@ -43,16 +43,31 @@ pub struct StoredUser {
     pub username: String,
     pub display_name: String,
     pub password_hash: String,
+    /// Account role; pre-role records migrate from `is_admin` on read.
+    #[serde(default)]
+    pub role: SystemRole,
     pub is_admin: bool,
     pub disabled: bool,
     pub created_at: DateTime<Utc>,
 }
 
 impl StoredUser {
+    /// Reconciles `role` and `is_admin`: migrates a pre-role admin (is_admin
+    /// with the default User role) to the Admin role, then keeps is_admin in
+    /// step with the role. Applied on every read.
+    pub fn normalized(mut self) -> Self {
+        if self.is_admin && self.role == SystemRole::User {
+            self.role = SystemRole::Admin;
+        }
+        self.is_admin = self.role.is_admin();
+        self
+    }
+
     pub fn info(&self) -> UserInfo {
         UserInfo {
             username: self.username.clone(),
             display_name: self.display_name.clone(),
+            role: self.role,
             is_admin: self.is_admin,
             disabled: self.disabled,
         }
@@ -324,11 +339,11 @@ impl Db {
     // ---- users & sessions ----
 
     pub fn user(&self, username: &str) -> Result<Option<StoredUser>> {
-        self.get(USERS, &username.to_lowercase())
+        Ok(self.get::<StoredUser>(USERS, &username.to_lowercase())?.map(StoredUser::normalized))
     }
 
     pub fn users(&self) -> Result<Vec<StoredUser>> {
-        self.list(USERS)
+        Ok(self.list::<StoredUser>(USERS)?.into_iter().map(StoredUser::normalized).collect())
     }
 
     pub fn put_user(&self, user: &StoredUser) -> Result<()> {

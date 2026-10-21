@@ -233,6 +233,7 @@ fn set_password(db: &Db, username: &str, password: &str) -> Result<()> {
             username: username.to_string(),
             display_name: username.to_string(),
             password_hash: hash,
+            role: systemdeck_core::SystemRole::Admin,
             is_admin: true,
             disabled: false,
             created_at: Utc::now(),

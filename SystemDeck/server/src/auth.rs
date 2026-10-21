@@ -10,6 +10,7 @@ use axum::{
     http::{header::AUTHORIZATION, request::Parts},
 };
 use rand::{distributions::Alphanumeric, Rng};
+use systemdeck_core::Capability;
 
 use crate::{
     error::ApiError,
@@ -65,6 +66,17 @@ pub struct AuthUser {
     pub token_hash: String,
 }
 
+impl AuthUser {
+    /// Enforces a server-wide capability for this user's role.
+    pub fn require(&self, cap: Capability) -> Result<(), ApiError> {
+        if self.user.role.allows(cap) {
+            Ok(())
+        } else {
+            Err(ApiError::forbidden("your role does not permit this action"))
+        }
+    }
+}
+
 impl FromRequestParts<AppState> for AuthUser {
     type Rejection = ApiError;
 
@@ -91,17 +103,3 @@ impl FromRequestParts<AppState> for AuthUser {
     }
 }
 
-/// A signed-in administrator.
-pub struct AdminUser(pub StoredUser);
-
-impl FromRequestParts<AppState> for AdminUser {
-    type Rejection = ApiError;
-
-    async fn from_request_parts(parts: &mut Parts, state: &AppState) -> Result<Self, ApiError> {
-        let auth = AuthUser::from_request_parts(parts, state).await?;
-        if !auth.user.is_admin {
-            return Err(ApiError::forbidden("administrator access required"));
-        }
-        Ok(AdminUser(auth.user))
-    }
-}

@@ -370,10 +370,71 @@ pub struct Team {
     pub members: Vec<String>,
 }
 
+/// Account-level role: what a user may do server-wide (distinct from the
+/// per-vault Read/Write/Manage grant above).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemRole {
+    /// Full control of the server.
+    Admin,
+    /// Manage vaults and teams; view recordings and the audit log.
+    Manager,
+    /// Read-only oversight: view recordings, audit and stats.
+    Auditor,
+    /// Standard user: use vaults and AI as granted; no administration.
+    #[default]
+    User,
+}
+
+/// A single server-wide capability. Roles are bundles of these.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Capability {
+    ManageUsers,
+    ManageConfig,
+    ManageVaults,
+    ManageTeams,
+    ViewRecordings,
+    DeleteRecordings,
+    ViewAudit,
+    ViewStats,
+}
+
+impl SystemRole {
+    pub const ALL: [SystemRole; 4] = [SystemRole::Admin, SystemRole::Manager, SystemRole::Auditor, SystemRole::User];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            SystemRole::Admin => "Administrator",
+            SystemRole::Manager => "Manager",
+            SystemRole::Auditor => "Auditor",
+            SystemRole::User => "User",
+        }
+    }
+
+    pub fn is_admin(self) -> bool {
+        matches!(self, SystemRole::Admin)
+    }
+
+    /// Whether this role grants a capability.
+    pub fn allows(self, cap: Capability) -> bool {
+        use Capability::*;
+        use SystemRole::*;
+        match self {
+            Admin => true,
+            Manager => matches!(cap, ManageVaults | ManageTeams | ViewRecordings | DeleteRecordings | ViewAudit | ViewStats),
+            Auditor => matches!(cap, ViewRecordings | ViewAudit | ViewStats),
+            User => false,
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct UserInfo {
     pub username: String,
     pub display_name: String,
+    #[serde(default)]
+    pub role: SystemRole,
+    /// Derived convenience (role == Admin); kept for existing checks.
     pub is_admin: bool,
     pub disabled: bool,
 }

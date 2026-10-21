@@ -113,13 +113,27 @@ async function api(method, path, body) {
   return data;
 }
 
+// ---- roles & capabilities (mirrors the server) ----
+const ROLE_CAPS = {
+  admin: ["manage_users", "manage_config", "manage_vaults", "manage_teams", "view_recordings", "delete_recordings", "view_audit", "view_stats"],
+  manager: ["manage_vaults", "manage_teams", "view_recordings", "delete_recordings", "view_audit", "view_stats"],
+  auditor: ["view_recordings", "view_audit", "view_stats"],
+  user: [],
+};
+const ROLE_LABELS = { admin: "Administrator", manager: "Manager", auditor: "Auditor", user: "User" };
+const VIEW_CAP = { overview: "view_stats", users: "manage_users", teams: "manage_teams", vaults: "manage_vaults", recordings: "view_recordings", audit: "view_audit", settings: "manage_config", download: null };
+function myRole() { return (state.me && state.me.role) || "user"; }
+function can(cap) { return (ROLE_CAPS[myRole()] || []).includes(cap); }
+function emptyStats() { return { version: "", uptime_secs: 0, users: 0, admins: 0, disabled_users: 0, teams: 0, vaults: 0, entries: 0, active_sessions: 0, vault_entries: {}, users_detail: [] }; }
+
 async function loadAll() {
+  const g = (cap, path, fallback) => (can(cap) ? api("GET", path).catch(() => fallback) : Promise.resolve(fallback));
   const [users, teams, vaults, stats, recordings] = await Promise.all([
-    api("GET", "/api/admin/users"),
-    api("GET", "/api/admin/teams"),
-    api("GET", "/api/admin/vaults"),
-    api("GET", "/api/admin/stats"),
-    api("GET", "/api/admin/recordings"),
+    g("manage_users", "/api/admin/users", []),
+    g("manage_teams", "/api/admin/teams", []),
+    g("manage_vaults", "/api/admin/vaults", []),
+    g("view_stats", "/api/admin/stats", emptyStats()),
+    g("view_recordings", "/api/admin/recordings", []),
   ]);
   Object.assign(state, { users, teams, vaults, stats, recordings });
 }
@@ -187,8 +201,9 @@ function signOut(callServer = true) {
 async function start() {
   try {
     state.me = await api("GET", "/api/me");
-    // Staff accounts only get the download page; everything else is for administrators.
-    if (state.me.is_admin) await loadAll(); else state.view = "download";
+    // Privileged roles get management views; plain users only the download page.
+    const privileged = myRole() !== "user";
+    if (privileged) { await loadAll(); state.view = "overview"; } else { state.view = "download"; }
     await loadDownloads();
   } catch (e) {
     showLogin(e.message);
@@ -196,9 +211,13 @@ async function start() {
   }
   $("login").classList.add("hidden");
   $("app").classList.remove("hidden");
-  for (const b of document.querySelectorAll(".admin-only")) b.classList.toggle("hidden", !state.me.is_admin);
+  // Show each nav item only if the role has its capability (download is open).
+  for (const b of document.querySelectorAll(".nav-item")) {
+    const cap = VIEW_CAP[b.dataset.view];
+    b.classList.toggle("hidden", cap ? !can(cap) : false);
+  }
   const name = state.me.display_name || state.me.username;
-  $("me").replaceChildren(avatar(name), h("div", {}, h("div", {}, name), h("div", { class: "muted" }, state.me.is_admin ? "Administrator" : "User")));
+  $("me").replaceChildren(avatar(name), h("div", {}, h("div", {}, name), h("div", { class: "muted" }, ROLE_LABELS[myRole()] || "User")));
   render();
 }
 
@@ -287,6 +306,15 @@ function principalName(p) {
 
 // ---------- users ----------
 
+// A role dropdown that PUTs the new role; disabled for your own account.
+function roleSelect(u, self) {
+  const sel = h("select", { disabled: self, title: self ? "You can't change your own role" : null },
+    ...["admin", "manager", "auditor", "user"].map((r) => h("option", { value: r }, ROLE_LABELS[r])));
+  sel.value = u.role || (u.is_admin ? "admin" : "user");
+  sel.addEventListener("change", () => act(api("PUT", `/api/admin/users/${encodeURIComponent(u.username)}`, { role: sel.value }), `${u.username}: role set to ${ROLE_LABELS[sel.value]}`));
+  return sel;
+}
+
 function renderUsers() {
   setHeader("Users", `${state.users.length} accounts`, h("button", { class: "primary", onclick: newUser }, "+ New user"));
   const activity = Object.fromEntries(state.stats.users_detail.map((u) => [u.username, u]));
@@ -296,14 +324,11 @@ function renderUsers() {
     return h("tr", {},
       h("td", {}, h("div", { class: "who" }, avatar(u.display_name || u.username),
         h("div", {}, h("div", {}, u.display_name || u.username), h("div", { class: "sub" }, u.username)))),
-      h("td", {}, u.is_admin ? h("span", { class: "badge admin" }, "Admin") : h("span", { class: "muted" }, "User")),
+      h("td", {}, roleSelect(u, self)),
       h("td", {}, u.disabled ? h("span", { class: "badge off" }, "Disabled") : "Active"),
       h("td", {}, h("span", { class: `dot ${presence(a.last_seen)}` }), ago(a.last_seen), a.sessions ? h("span", { class: "muted" }, ` · ${a.sessions} session(s)`) : null),
       h("td", {}, h("div", { class: "row-actions" },
         h("button", { class: "small", onclick: () => resetPassword(u) }, "Reset password"),
-        h("button", { class: "small", disabled: self, title: self ? "You cannot demote yourself" : null,
-          onclick: () => act(api("PUT", `/api/admin/users/${encodeURIComponent(u.username)}`, { is_admin: !u.is_admin }), u.is_admin ? "Admin rights removed" : "Now an administrator") },
-          u.is_admin ? "Remove admin" : "Make admin"),
         h("button", { class: "small", disabled: self || !a.sessions,
           onclick: () => act(api("POST", `/api/admin/users/${encodeURIComponent(u.username)}/revoke`), `${u.username} signed out everywhere`) }, "Sign out"),
         h("button", { class: "small" + (u.disabled ? "" : " danger"), disabled: self,
@@ -320,14 +345,15 @@ function newUser() {
     username: h("input", { placeholder: "e.g. jdoe", autocomplete: "off" }),
     display: h("input", { placeholder: "Jane Doe" }),
     password: h("input", { type: "password", autocomplete: "new-password", placeholder: "at least 8 characters" }),
-    admin: h("input", { type: "checkbox" }),
+    role: h("select", {}, ...["user", "auditor", "manager", "admin"].map((r) => h("option", { value: r }, ROLE_LABELS[r]))),
   };
+  f.role.value = "user";
   modal("New user", h("div", {},
     h("label", {}, "Username", f.username),
     h("label", {}, "Display name", f.display),
     h("label", {}, "Initial password", f.password),
-    h("label", { class: "check" }, f.admin, "Administrator")), "Create", async () => {
-    await api("POST", "/api/admin/users", { username: f.username.value, display_name: f.display.value, password: f.password.value, is_admin: f.admin.checked });
+    h("label", {}, "Role", f.role)), "Create", async () => {
+    await api("POST", "/api/admin/users", { username: f.username.value, display_name: f.display.value, password: f.password.value, role: f.role.value });
     toast("User created");
     await loadAll();
     render();
