@@ -1081,6 +1081,8 @@ pub struct BrowserSession {
     rec: Option<BrowserRec>,
     /// Set while the "open externally while recording" warning is showing.
     confirm_external: bool,
+    /// Page zoom factor (1.0 = 100%).
+    zoom: f64,
 }
 
 /// Records a browser session: a thread screenshots the WebView2 window about
@@ -1154,6 +1156,7 @@ impl BrowserSession {
             parent: parent_hwnd,
             rec,
             confirm_external: false,
+            zoom: 1.0,
         })
     }
 
@@ -1234,6 +1237,26 @@ impl SessionView for BrowserSession {
         }
         if ui.button("Home").on_hover_text("Return to the entry's start page").clicked() {
             let _ = self.webview.load_url(&self.url);
+        }
+        // Page zoom, for sites built for wider screens than the tab (Ctrl + mouse wheel also works).
+        ui.separator();
+        let mut zoom = self.zoom;
+        if ui.button("-").on_hover_text("Zoom out").clicked() {
+            zoom = (zoom - 0.1).max(0.3);
+        }
+        if ui
+            .button(format!("{:.0}%", self.zoom * 100.0))
+            .on_hover_text("Page zoom - click to reset to 100%")
+            .clicked()
+        {
+            zoom = 1.0;
+        }
+        if ui.button("+").on_hover_text("Zoom in").clicked() {
+            zoom = (zoom + 0.1).min(3.0);
+        }
+        if (zoom - self.zoom).abs() > f64::EPSILON {
+            self.zoom = (zoom * 10.0).round() / 10.0;
+            let _ = self.webview.zoom(self.zoom);
         }
         if !self.password.is_empty() {
             ui.separator();

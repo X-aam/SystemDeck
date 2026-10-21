@@ -1155,7 +1155,7 @@ fn group_header(ui: &mut egui::Ui, label: &str, count: usize, collapsed: bool) -
 }
 
 /// Height of one connection row in the side list.
-const ENTRY_ROW_HEIGHT: f32 = 38.0;
+const ENTRY_ROW_HEIGHT: f32 = 28.0;
 
 /// Small rounded kind tag ("RDP", "SSH", ...) used in the compact connection list.
 fn kind_tag(painter: &egui::Painter, rect: egui::Rect, fill: Color32, text: &str) {
@@ -1164,12 +1164,13 @@ fn kind_tag(painter: &egui::Painter, rect: egui::Rect, fill: Color32, text: &str
 }
 
 /// A shorter variant of `pill` that fits the compact rows.
-fn small_pill(painter: &egui::Painter, right_center: egui::Pos2, text: &str, fill: Color32) {
+fn small_pill(painter: &egui::Painter, right_center: egui::Pos2, text: &str, fill: Color32) -> egui::Rect {
     let galley = painter.layout_no_wrap(text.to_string(), FontId::proportional(9.5), Color32::WHITE);
     let size = egui::vec2(galley.size().x + 10.0, 14.0);
     let rect = egui::Rect::from_min_size(right_center - egui::vec2(size.x, size.y / 2.0), size);
     painter.rect_filled(rect, 7.0, fill);
     painter.galley(rect.center() - galley.size() / 2.0, galley, Color32::WHITE);
+    rect
 }
 
 /// `picked`: Some(..) in selection mode (row shows a check circle instead of the avatar).
@@ -1185,7 +1186,7 @@ fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, pic
     }
     let cy = rect.center().y;
     // Compact kind tag ("RDP", "SSH", ...) instead of a large round avatar.
-    let badge = egui::Rect::from_center_size(egui::pos2(rect.min.x + 26.0, cy), egui::vec2(32.0, 17.0));
+    let badge = egui::Rect::from_center_size(egui::pos2(rect.min.x + 26.0, cy), egui::vec2(30.0, 16.0));
     match picked {
         Some(true) => {
             painter.rect_filled(badge, 4.0, theme::ACCENT);
@@ -1198,24 +1199,26 @@ fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, pic
         None => kind_tag(&painter, badge, kind_color(e.kind), e.kind.badge()),
     }
 
-    // Right column: time + status pill
-    let right = rect.max.x - 16.0;
+    // Right side: time, with a status pill (or unsynced dot) just before it
+    let right = rect.max.x - 12.0;
     let local = e.updated_at.with_timezone(&Local);
     let when = if local.date_naive() == Local::now().date_naive() { local.format("%H:%M").to_string() } else { local.format("%d %b").to_string() };
-    painter.text(egui::pos2(right, cy - 7.0), egui::Align2::RIGHT_CENTER, when, FontId::proportional(10.0), theme::text_weak());
+    let when_rect = painter.text(egui::pos2(right, cy), egui::Align2::RIGHT_CENTER, when, FontId::proportional(10.0), theme::text_weak());
+    let mut text_right = when_rect.min.x - 8.0;
     if le.conflict.is_some() {
-        small_pill(&painter, egui::pos2(right, cy + 8.0), "conflict", theme::DANGER);
+        text_right = small_pill(&painter, egui::pos2(text_right, cy), "conflict", theme::DANGER).min.x - 6.0;
     } else if live {
-        small_pill(&painter, egui::pos2(right, cy + 8.0), "live", theme::ACCENT);
+        text_right = small_pill(&painter, egui::pos2(text_right, cy), "live", theme::ACCENT).min.x - 6.0;
     } else if le.dirty {
-        painter.circle_filled(egui::pos2(right - 4.0, cy + 8.0), 3.5, theme::WARN);
+        painter.circle_filled(egui::pos2(text_right - 4.0, cy), 3.5, theme::WARN);
+        text_right -= 14.0;
     }
 
-    // Name + subtitle, clipped before the right column
-    let text_left = rect.min.x + 50.0;
-    let clip = egui::Rect::from_min_max(egui::pos2(text_left, rect.min.y), egui::pos2(right - 52.0, rect.max.y));
+    // One line: name, then the host in grey right after it, clipped before the right side
+    let text_left = rect.min.x + 48.0;
+    let clip = egui::Rect::from_min_max(egui::pos2(text_left, rect.min.y), egui::pos2(text_right, rect.max.y));
     let p = painter.with_clip_rect(clip);
-    p.text(egui::pos2(text_left, cy - 7.0), egui::Align2::LEFT_CENTER, &e.name, FontId::proportional(12.5), theme::text());
+    let name_rect = p.text(egui::pos2(text_left, cy), egui::Align2::LEFT_CENTER, &e.name, FontId::proportional(12.5), theme::text());
     let mut sub = e.host.clone();
     if let Some(port) = e.port {
         if !sub.is_empty() && Some(port) != e.kind.default_port() {
@@ -1225,7 +1228,7 @@ fn entry_row(ui: &mut egui::Ui, le: &LocalEntry, selected: bool, live: bool, pic
     if sub.is_empty() {
         sub = e.kind.label().to_string();
     }
-    p.text(egui::pos2(text_left, cy + 8.0), egui::Align2::LEFT_CENTER, sub, FontId::proportional(11.0), theme::text_weak());
+    p.text(egui::pos2(name_rect.max.x + 8.0, cy), egui::Align2::LEFT_CENTER, sub, FontId::proportional(11.0), theme::text_weak());
     painter.hline(egui::Rangef::new(text_left, rect.max.x), rect.max.y - 0.5, Stroke::new(1.0_f32, theme::border()));
 
     let ctrl = ui.input(|i| i.modifiers.command);
