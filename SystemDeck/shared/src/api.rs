@@ -133,6 +133,9 @@ pub struct EntrySummary {
     pub group: String,
     pub host: String,
     pub username: String,
+    /// Login address of Website entries ("" for other kinds).
+    #[serde(default)]
+    pub url: String,
     pub updated_by: String,
     pub updated_at: chrono::DateTime<chrono::Utc>,
     #[serde(default)]

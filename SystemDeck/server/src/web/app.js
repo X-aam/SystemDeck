@@ -102,6 +102,29 @@ function uptime(secs) {
 }
 
 let toastTimer;
+// Clipboard copy with a fallback for plain-http pages (navigator.clipboard
+// only exists in secure contexts).
+async function copyText(text, what) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      const ta = h("textarea", { style: "position:fixed;opacity:0" }, text);
+      document.body.appendChild(ta);
+      ta.select();
+      document.execCommand("copy");
+      ta.remove();
+    }
+    toast(`${what} copied`);
+  } catch (err) { toast(`Couldn't copy ${what.toLowerCase()}: ${err.message}`, true); }
+}
+
+// Login address of an entry: its URL, or https://host for Website entries without one.
+function loginUrl(e) {
+  if ((e.url || "").trim()) return e.url.trim();
+  return e.kind === "Web" && (e.host || "").trim() ? `https://${e.host.trim()}` : "";
+}
+
 function toast(message, isError) {
   const t = $("toast");
   t.textContent = message;
@@ -533,7 +556,10 @@ function editAccess(v) {
 async function showEntries(v) {
   let entries;
   try { entries = await api("GET", `/api/admin/vaults/${v.id}/entries`); } catch (e) { toast(e.message, true); return; }
-  setHeader(v.name, `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`, h("button", { class: "small", onclick: renderVaults }, "← Back to vaults"));
+  setHeader(v.name, `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`,
+    h("button", { class: "small primary", onclick: () => newEntry(v) }, "+ New entry"),
+    h("button", { class: "small", onclick: () => importEntries(v) }, "Import CSV"),
+    h("button", { class: "small", onclick: renderVaults }, "← Back to vaults"));
   const recordable = (e) => CAN_EMBED.includes(e.kind);
   // Entry-level recording switch; the vault policy overrides it.
   const recSwitch = (e) => {
@@ -559,8 +585,11 @@ async function showEntries(v) {
         h("div", {}, e.name),
         h("div", { class: "muted" }, [e.group, e.username && e.host ? `${e.username}@${e.host}` : e.host].filter(Boolean).join(" · "))),
       recSwitch(e),
+      e.username ? h("button", { class: "small", title: e.username, onclick: () => copyText(e.username, "Username") }, "Copy user") : null,
+      loginUrl(e) ? h("button", { class: "small", title: loginUrl(e), onclick: () => copyText(loginUrl(e), "Login URL") }, "Copy URL") : null,
       h("button", { class: "small", onclick: () => editEntry(v, e) }, "Edit"),
       h("button", { class: "small", onclick: () => dupEntry(v, e) }, "Duplicate"),
+      h("button", { class: "small", onclick: () => delEntry(v, e) }, "Delete"),
       h("span", { class: "muted", title: new Date(e.updated_at).toLocaleString() }, `${e.updated_by || "-"} · ${ago(e.updated_at)}`))))
     : h("p", { class: "muted" }, "This vault is empty. Users add entries from the desktop client.");
   const hint = v.record_ssh
@@ -578,10 +607,185 @@ async function dupEntry(v, e) {
   } catch (err) { toast(err.message, true); }
 }
 
+// ---- Bulk import (CSV parsed in the browser, posted as entry objects) ----
+
+// Column header aliases, matching the desktop client's CSV importer.
+const CSV_COLS = {
+  name: ["display name", "name", "title", "entry name"],
+  host: ["host", "hostname", "host name", "address", "computer", "server"],
+  port: ["port"],
+  kind: ["type", "kind", "connection type", "protocol"],
+  group: ["folder", "group", "path", "group/folder"],
+  user: ["username", "user name", "user", "login"],
+  pass: ["password", "pass"],
+  domain: ["domain"],
+  url: ["url", "website", "web address"],
+  notes: ["description", "notes", "note", "comment", "comments"],
+  tags: ["tags", "keywords"],
+};
+
+// Minimal RFC-4180 CSV parser: handles quoted fields, "" escapes and CRLF.
+function parseCsv(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  text = String(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i++; } else inQuotes = false; }
+      else field += c;
+    } else if (c === '"') inQuotes = true;
+    else if (c === ",") { row.push(field); field = ""; }
+    else if (c === "\n") { row.push(field); rows.push(row); row = []; field = ""; }
+    else field += c;
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+
+function csvParseKind(s) {
+  s = (s || "").toLowerCase();
+  if (!s) return null;
+  if (s.includes("rdp") || s.includes("remote desktop")) return "Rdp";
+  if (s.includes("ssh") || s.includes("putty")) return "Ssh";
+  if (s.includes("vnc")) return "Vnc";
+  if (s.includes("telnet")) return "Telnet";
+  if (s.includes("serial") || s.includes("com port")) return "Serial";
+  if (s.includes("web") || s.includes("http")) return "Web";
+  if (s.includes("credential") || s.includes("password") || s.includes("login")) return "Credential";
+  if (s.includes("note")) return "Note";
+  return null;
+}
+
+function csvInferKind(host, port, url) {
+  const up = (host || "").toUpperCase();
+  if (up.startsWith("COM") && up.length > 3 && /^\d+$/.test(up.slice(3))) return "Serial";
+  if (port != null) {
+    if (port >= 3389 && port <= 3399) return "Rdp";
+    if (port === 22) return "Ssh";
+    if (port === 23) return "Telnet";
+    if (port >= 5900 && port <= 5910) return "Vnc";
+    if ([80, 443, 8080, 8443].includes(port)) return "Web";
+    return "Ssh";
+  }
+  if (url) return "Web";
+  if ((host || "").includes(".")) return "Web";
+  return "Credential";
+}
+
+function csvToEntries(text) {
+  const rows = parseCsv(text).filter((r) => r.some((c) => c.trim() !== ""));
+  if (!rows.length) throw new Error("no rows found");
+  const headers = rows[0].map((hd) => hd.replace(/^﻿/, "").trim().toLowerCase());
+  const find = (names) => { for (const n of names) { const i = headers.indexOf(n); if (i >= 0) return i; } return -1; };
+  const cols = {};
+  for (const k in CSV_COLS) cols[k] = find(CSV_COLS[k]);
+  if (cols.name < 0 && cols.host < 0) throw new Error(`the CSV needs at least a Name or Host column (found: ${headers.join(", ")})`);
+  const entries = [], skipped = [];
+  for (let r = 1; r < rows.length; r++) {
+    const rec = rows[r];
+    const get = (i) => (i >= 0 && rec[i] != null ? rec[i].trim() : "");
+    const host = get(cols.host);
+    const name = get(cols.name) || host;
+    if (!name) { skipped.push(`line ${r + 1}: no name or host`); continue; }
+    const portText = get(cols.port);
+    let port = null;
+    if (portText) {
+      const p = Number(portText);
+      if (!Number.isInteger(p) || p < 0 || p > 65535) { skipped.push(`line ${r + 1}: bad port '${portText}'`); continue; }
+      port = p;
+    }
+    let url = get(cols.url);
+    const kind = csvParseKind(get(cols.kind)) || csvInferKind(host, port, url);
+    if (!url && kind === "Web" && host) url = `https://${host}`;
+    entries.push({
+      kind, name,
+      group: get(cols.group).replace(/\\/g, "/").replace(/^\/+|\/+$/g, ""),
+      host, port,
+      username: get(cols.user), password: get(cols.pass), domain: get(cols.domain), url,
+      notes: get(cols.notes),
+      tags: get(cols.tags).split(/[,;]/).map((t) => t.trim()).filter(Boolean),
+    });
+  }
+  return { entries, skipped };
+}
+
+// Sample CSV showing every recognised column; one row per entry type.
+const CSV_TEMPLATE = [
+  "Name,Type,Host,Port,Folder,Username,Password,Domain,URL,Description,Tags",
+  "DC01,RDP,10.0.0.10,3389,Servers/Core,administrator,,CORP,,Domain controller,windows;core",
+  "web01,SSH,10.0.0.20,22,Servers/Linux,root,,,,Web server,linux",
+  "lab-vnc,VNC,10.0.0.30,5900,Lab,,,,,,",
+  "switch01,Telnet,10.0.0.1,23,Network,admin,,,,Core switch,network",
+  "console,Serial,COM3,,Network,,,,,Console cable,",
+  "Router UI,Website,,,Network,admin,,,https://192.168.1.1,,network",
+  "Backup account,Credential,,,Accounts,svc-backup,,CORP,,Service account,",
+  "Runbook,Note,,,Docs,,,,,Restart order: DB then app,",
+].join("\r\n") + "\r\n";
+
+function downloadCsvTemplate() {
+  const blob = new Blob(["﻿" + CSV_TEMPLATE], { type: "text/csv;charset=utf-8" });
+  const a = h("a", { href: URL.createObjectURL(blob), download: "systemdeck-import-template.csv" });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function importEntries(v) {
+  const ta = h("textarea", { rows: "10", placeholder: "Paste CSV here — the first row is the column headers.", style: "width:100%;box-sizing:border-box;font-family:monospace;font-size:12px" });
+  const file = h("input", { type: "file", accept: ".csv,text/csv,text/plain" });
+  file.addEventListener("change", () => {
+    const f = file.files && file.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => { ta.value = reader.result; };
+    reader.readAsText(f);
+  });
+  const body = h("div", {},
+    h("p", { class: "muted" }, "Columns are matched by name: Name/Display Name, Host/Address, Port, Type, Folder/Group, Username, Password, Domain, URL, Description/Notes, Tags. A Name or Host column is required; Remote Desktop Manager exports work as-is. Exact duplicates (same name, host and port) are skipped."),
+    h("p", {}, h("button", { type: "button", class: "small", onclick: downloadCsvTemplate }, "Download template"),
+      h("span", { class: "muted" }, " — a sample CSV with every column and one row per entry type.")),
+    h("label", {}, "CSV file", file),
+    h("label", {}, "or paste CSV", ta));
+  modal(`Import into ${v.name}`, body, "Import", async () => {
+    const { entries, skipped } = csvToEntries(ta.value);
+    if (!entries.length) throw new Error(skipped.length ? `nothing to import — ${skipped.join("; ")}` : "no data rows found");
+    const report = await api("POST", `/api/admin/vaults/${v.id}/entries/import`, entries);
+    const serverSkip = (report.skipped || []).length;
+    const totalSkip = serverSkip + skipped.length;
+    let msg = `Imported ${report.added} entr${report.added === 1 ? "y" : "ies"}`;
+    if (report.duplicates) msg += `, ${report.duplicates} already present`;
+    if (totalSkip) msg += `, ${totalSkip} skipped`;
+    toast(msg, totalSkip > 0);
+    await loadAll();
+    showEntries(v);
+  }, { wide: true });
+}
+
+function delEntry(v, e) {
+  confirmModal("Delete entry", `Delete "${e.name}"? Clients remove it on their next sync.`, "Delete", async () => {
+    await api("DELETE", `/api/admin/vaults/${v.id}/entries/${e.id}`);
+    toast(`Deleted "${e.name}"`);
+    await loadAll();
+    showEntries(v);
+  });
+}
+
 async function editEntry(v, summary) {
   let e;
   try { e = await api("GET", `/api/admin/vaults/${v.id}/entries/${summary.id}`); } catch (err) { toast(err.message, true); return; }
   renderEntryEditor(v, e);
+}
+
+// A blank entry for manual creation. `_new` tells the editor to POST (create)
+// rather than PUT (update). Defaults mirror the desktop client's new entry.
+function newEntry(v) {
+  renderEntryEditor(v, {
+    _new: true, kind: "Rdp", name: "", group: "", host: "", port: null,
+    username: "", password: "", domain: "", url: "", notes: "", tags: [],
+    display: "Default", record_session: false, screen: {},
+  });
 }
 
 // Full, inline entry editor (every field). Re-renders on type change so only
@@ -589,10 +793,13 @@ async function editEntry(v, summary) {
 function renderEntryEditor(v, e) {
   if (!e.screen) e.screen = {};
   const k = e.kind;
-  setHeader("Edit entry", `${v.name} › ${e.name || "entry"}`, h("button", { class: "small", onclick: () => showEntries(v) }, "← Back to entries"));
+  setHeader(e._new ? "New entry" : "Edit entry", `${v.name} › ${e.name || "entry"}`, h("button", { class: "small", onclick: () => showEntries(v) }, "← Back to entries"));
   const rows = [];
   const add = (label, control) => rows.push(h("label", {}, label, control));
   const txt = (key, ph) => { const el = h("input", { value: e[key] != null ? e[key] : "", placeholder: ph || "" }); el.addEventListener("input", () => (e[key] = el.value)); return el; };
+  // A text field with a Copy button that copies its current value.
+  const withCopy = (input, what) => h("div", { class: "row-actions" }, input,
+    h("button", { class: "small", type: "button", onclick: () => input.value ? copyText(input.value, what) : toast(`No ${what.toLowerCase()} to copy`, true) }, "Copy"));
   const pick = (key, labels) => { const el = h("select", {}, ...Object.entries(labels).map(([val, lab]) => h("option", { value: val }, lab))); el.value = e[key]; el.addEventListener("change", () => { e[key] = el.value; if (key === "kind") renderEntryEditor(v, e); }); return el; };
   const topCheck = (key, label) => { const b = h("input", { type: "checkbox" }); b.checked = !!e[key]; b.addEventListener("change", () => (e[key] = b.checked)); return h("label", { class: "check" }, b, label); };
 
@@ -606,10 +813,10 @@ function renderEntryEditor(v, e) {
     el.addEventListener("input", () => (e.port = el.value ? Number(el.value) : null));
     add("Port", el);
   }
-  if (k === "Web") add("URL", txt("url", "https://..."));
+  if (k === "Web") add("URL", withCopy(txt("url", "https://..."), "Login URL"));
   if (k !== "Note") {
     if (k === "Rdp" || k === "Credential") add("Domain", txt("domain"));
-    if (k !== "RemoteSupport") add("Username", txt("username"));
+    if (k !== "RemoteSupport") add("Username", withCopy(txt("username"), "Username"));
     const pwd = h("input", { type: "password", value: e.password || "" });
     pwd.addEventListener("input", () => (e.password = pwd.value));
     const reveal = h("button", { class: "small", type: "button" }, "Show");
@@ -638,8 +845,14 @@ function renderEntryEditor(v, e) {
 
   const save = h("button", { class: "primary", onclick: async () => {
     if (!(e.name || "").trim()) { toast("Name is required", true); return; }
-    try { await api("PUT", `/api/admin/vaults/${v.id}/entries/${e.id}`, e); toast("Entry saved"); await loadAll(); showEntries(v); } catch (err) { toast(err.message, true); }
-  } }, "Save entry");
+    try {
+      if (e._new) await api("POST", `/api/admin/vaults/${v.id}/entries`, e);
+      else await api("PUT", `/api/admin/vaults/${v.id}/entries/${e.id}`, e);
+      toast(e._new ? "Entry created" : "Entry saved");
+      await loadAll();
+      showEntries(v);
+    } catch (err) { toast(err.message, true); }
+  } }, e._new ? "Create entry" : "Save entry");
   const cancel = h("button", { class: "small", onclick: () => showEntries(v) }, "Cancel");
   $("view").replaceChildren(h("div", { class: "card", style: "max-width:720px" }, ...rows, h("div", { style: "margin-top:16px; display:flex; gap:10px" }, save, cancel)));
 }
@@ -1263,17 +1476,30 @@ function renderDownload() {
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (e) { toast(e.message, true); }
   };
+  // What each published file is, so users pick the right one.
+  const describe = (name) => {
+    const n = name.toLowerCase();
+    if (n.includes("portable")) return "Portable - no install, no admin rights: just run it.";
+    if (n.includes("setup")) return "Installer - adds SystemDeck to the Start menu.";
+    if (n.endsWith(".zip")) return "Zip - unzip anywhere and run systemdeck.exe.";
+    if (n.endsWith(".crt")) return "Server certificate - install it to trust this server's HTTPS.";
+    return "";
+  };
+  const rank = (name) => ["portable", "setup", ".zip"].findIndex((k) => name.toLowerCase().includes(k)) >>> 0;
+  const ordered = [...files].sort((a, b) => rank(a.name) - rank(b.name));
   const list = files.length
-    ? h("ul", { class: "list" }, files.map((f) => h("li", {},
-      h("span", { class: "badge kind", style: "background:#38c2b2" }, f.name.endsWith(".zip") ? "ZIP" : "EXE"),
-      h("div", { class: "grow" }, h("div", {}, f.name), h("div", { class: "muted" }, `${fmtBytes(f.bytes)}${f.modified ? " · built " + new Date(f.modified).toLocaleString() : ""}`)),
+    ? h("ul", { class: "list" }, ordered.map((f) => h("li", {},
+      h("span", { class: "badge kind", style: "background:#38c2b2" }, f.name.endsWith(".zip") ? "ZIP" : f.name.endsWith(".crt") ? "CRT" : "EXE"),
+      h("div", { class: "grow" }, h("div", {}, f.name),
+        describe(f.name) ? h("div", {}, describe(f.name)) : null,
+        h("div", { class: "muted" }, `${fmtBytes(f.bytes)}${f.modified ? " · built " + new Date(f.modified).toLocaleString() : ""}`)),
       h("button", { class: "primary", onclick: () => download(f) }, "Download"))))
     : h("p", { class: "muted" }, "No download has been published on this server yet. Ask your administrator (it is created by build.ps1 in the server's downloads folder).");
   $("view").replaceChildren(h("div", { class: "card" },
     list,
     h("h3", {}, "Setup"),
     h("ol", { class: "steps" },
-      h("li", {}, "Download and unzip it anywhere (no installation needed), then start systemdeck.exe."),
+      h("li", {}, "Download SystemDeck-Portable.exe and run it (nothing to install). Or use the installer / zip."),
       h("li", {}, "Click the account button → Connect to server."),
       h("li", {}, "Server: ", h("code", {}, location.origin), " · your SystemDeck username and password."),
       h("li", {}, "Your team's vaults appear in the vault picker and stay available offline."))));

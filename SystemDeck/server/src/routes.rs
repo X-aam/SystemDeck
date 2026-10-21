@@ -53,8 +53,9 @@ pub fn router(state: AppState) -> Router {
         .route("/api/admin/config", get(admin_get_config).put(admin_put_config))
         .route("/api/admin/config/test-ai", post(admin_test_ai))
         .route("/api/admin/config/list-models", post(admin_list_ai_models))
-        .route("/api/admin/vaults/{id}/entries", get(admin_vault_entries))
-        .route("/api/admin/vaults/{id}/entries/{entry}", get(admin_get_entry).put(admin_update_entry))
+        .route("/api/admin/vaults/{id}/entries", get(admin_vault_entries).post(admin_create_entry))
+        .route("/api/admin/vaults/{id}/entries/import", post(admin_bulk_import).layer(DefaultBodyLimit::max(16 * 1024 * 1024)))
+        .route("/api/admin/vaults/{id}/entries/{entry}", get(admin_get_entry).put(admin_update_entry).delete(admin_delete_entry))
         .route("/api/admin/vaults/{id}/entries/{entry}/duplicate", post(admin_duplicate_entry))
         .route("/api/admin/vaults/{id}/entries/{entry}/recording", put(admin_entry_recording))
         .route("/api/admin/teams", get(admin_teams).post(admin_create_team))
@@ -519,6 +520,7 @@ async fn admin_vault_entries(State(st): State<AppState>, auth: AuthUser, Path(id
             group: e.group,
             host: e.host,
             username: e.username,
+            url: e.url,
             updated_by: e.updated_by,
             updated_at: e.updated_at,
             record_session: e.record_session,
@@ -526,6 +528,37 @@ async fn admin_vault_entries(State(st): State<AppState>, auth: AuthUser, Path(id
         .collect();
     out.sort_by(|a, b| (a.group.to_lowercase(), a.name.to_lowercase()).cmp(&(b.group.to_lowercase(), b.name.to_lowercase())));
     Ok(Json(out))
+}
+
+/// Creates a single new entry in a vault from the dashboard (the manual
+/// alternative to bulk import). The body is an Entry; the server assigns a
+/// fresh id and revision. Written as a normal revision so clients sync it.
+async fn admin_create_entry(
+    State(st): State<AppState>,
+    auth: AuthUser,
+    Path(vault_id): Path<Uuid>,
+    Json(mut body): Json<Entry>,
+) -> ApiResult<Json<Entry>> {
+    auth.require(Capability::ManageVaults)?;
+    st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
+    body.name = body.name.trim().to_string();
+    if body.name.is_empty() {
+        return Err(ApiError::bad_request("entry name is required"));
+    }
+    body.id = Uuid::new_v4();
+    body.vault_id = vault_id;
+    body.revision = 0;
+    body.deleted = false;
+    body.group = body.group.replace('\\', "/").trim_matches('/').to_string();
+    body.updated_by = auth.user.username.clone();
+    body.updated_at = Utc::now();
+    match st.db.apply_change(vault_id, body, 0, &auth.user.username, false)? {
+        PushResult::Accepted { entry } => {
+            st.db.audit(&auth.user.username, "entry_write", &entry.name, &format!("vault {vault_id} (dashboard, new)"));
+            Ok(Json(entry))
+        }
+        _ => Err(ApiError::bad_request("could not create the entry")),
+    }
 }
 
 /// Loads one full entry (including its secret) for editing in the dashboard.
@@ -565,6 +598,27 @@ async fn admin_update_entry(
     }
 }
 
+/// Soft-deletes an entry from the dashboard (marks it deleted as a new
+/// revision, so every client removes it on its next sync).
+async fn admin_delete_entry(State(st): State<AppState>, auth: AuthUser, Path((vault_id, entry_id)): Path<(Uuid, Uuid)>) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageVaults)?;
+    st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
+    let (entries, _) = st.db.entries_since(vault_id, 0)?;
+    let mut entry = entries.into_iter().find(|e| e.id == entry_id && !e.deleted).ok_or_else(|| ApiError::not_found("entry not found"))?;
+    let name = entry.name.clone();
+    let rev = entry.revision;
+    entry.deleted = true;
+    entry.updated_by = auth.user.username.clone();
+    entry.updated_at = Utc::now();
+    match st.db.apply_change(vault_id, entry, rev, &auth.user.username, false)? {
+        PushResult::Accepted { .. } => {
+            st.db.audit(&auth.user.username, "entry_delete", &name, &format!("vault {vault_id} (dashboard)"));
+            Ok(ok())
+        }
+        _ => Err(ApiError::bad_request("the entry changed meanwhile - reload and try again")),
+    }
+}
+
 /// Duplicates an entry within its vault (new id, name + " (copy)").
 async fn admin_duplicate_entry(State(st): State<AppState>, auth: AuthUser, Path((vault_id, entry_id)): Path<(Uuid, Uuid)>) -> ApiResult<Json<Entry>> {
     auth.require(Capability::ManageVaults)?;
@@ -587,6 +641,68 @@ async fn admin_duplicate_entry(State(st): State<AppState>, auth: AuthUser, Path(
         }
         _ => Err(ApiError::bad_request("could not duplicate the entry")),
     }
+}
+
+/// Bulk-imports entries into a vault from the dashboard. The browser parses the
+/// CSV (or other source) and posts an array of entries; the server validates,
+/// skips exact duplicates (same name + host + port), and writes each as a normal
+/// revision so clients sync them. Returns a per-row report.
+async fn admin_bulk_import(
+    State(st): State<AppState>,
+    auth: AuthUser,
+    Path(vault_id): Path<Uuid>,
+    Json(rows): Json<Vec<Entry>>,
+) -> ApiResult<Json<Value>> {
+    auth.require(Capability::ManageVaults)?;
+    st.db.vault(vault_id)?.ok_or_else(|| ApiError::not_found("vault not found"))?;
+    if rows.len() > 5000 {
+        return Err(ApiError::bad_request("too many rows in one import (limit 5000)"));
+    }
+
+    // Dedup key matches the client importer: name + host + port, case-insensitive.
+    let key = |e: &Entry| (e.name.trim().to_lowercase(), e.host.trim().to_lowercase(), e.port);
+    let (existing_entries, _) = st.db.entries_since(vault_id, 0)?;
+    let mut seen: HashSet<_> = existing_entries.iter().filter(|e| !e.deleted).map(|e| key(e)).collect();
+
+    let (mut added, mut duplicates) = (0usize, 0usize);
+    let mut skipped: Vec<String> = Vec::new();
+    for (i, mut row) in rows.into_iter().enumerate() {
+        let line = i + 1;
+        row.name = row.name.trim().to_string();
+        if row.name.is_empty() {
+            row.name = row.host.trim().to_string();
+        }
+        if row.name.is_empty() {
+            skipped.push(format!("row {line}: no name or host"));
+            continue;
+        }
+        if !seen.insert(key(&row)) {
+            duplicates += 1;
+            continue;
+        }
+        let entry = Entry {
+            id: Uuid::new_v4(),
+            vault_id,
+            revision: 0,
+            deleted: false,
+            group: row.group.replace('\\', "/").trim_matches('/').to_string(),
+            updated_by: auth.user.username.clone(),
+            updated_at: Utc::now(),
+            ..row
+        };
+        match st.db.apply_change(vault_id, entry, 0, &auth.user.username, false) {
+            Ok(PushResult::Accepted { .. }) => added += 1,
+            Ok(_) => skipped.push(format!("row {line}: rejected")),
+            Err(e) => skipped.push(format!("row {line}: {e}")),
+        }
+    }
+    st.db.audit(
+        &auth.user.username,
+        "entry_import",
+        &format!("{added} entr(ies)"),
+        &format!("vault {vault_id}"),
+    );
+    Ok(Json(json!({ "added": added, "duplicates": duplicates, "skipped": skipped })))
 }
 
 /// Entry-level recording switch from the dashboard. Written as a normal
