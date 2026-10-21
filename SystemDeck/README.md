@@ -5,6 +5,8 @@ Remote Desktop Manager. Staff keep connections (RDP, SSH, VNC, web, credentials,
 secure notes) in a desktop app that works offline, and share them with their team
 through a central server.
 
+Recent changes are in [CHANGELOG.md](CHANGELOG.md).
+
 ```
  ┌────────────── Desktop client (systemdeck.exe) ──────────────┐        ┌──── Server (systemdeck-server.exe) ────┐
  │  Local vault ── private, never leaves the PC               │        │  users · teams · vaults · access list │
